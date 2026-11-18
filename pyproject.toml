@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+version = "0.1.0"
+description = "The Read-Only Codebase & Schema Auditor is an autonomous developer tool that inspects a software repository alongside its database schema to catch silent bugs."
+requires-python = ">=3.13"
+name = "codebase-and-schema-auditor"
+dependencies = [
+    "fastmcp>=4.2.1",
+    "openai>=3.55.0",
+    "pydantic>=2.14.3",
+    "pydantic-settings>=2.16.3",
+    "pytest>=9.2.0",
+    "sqlglot>=30.33.0",
+]
+
+[dependency-groups]
+
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+

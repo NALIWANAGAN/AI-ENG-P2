@@ -3,7 +3,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from openai import OpenAI, OpenAIError
+from openai import AsyncOpenAI, OpenAIError
 from pydantic import SecretStr
 
 import clients.openai_client as openai_module
@@ -15,14 +15,15 @@ from core.settings import settings
 # =======================================================
 
 
+@pytest.mark.anyio
 class TestMockedOpenAIClient:
-    def test_happy_fixture_replaces_module_client(self, mock_openai_client: MagicMock) -> None:
+    async def test_happy_fixture_replaces_module_client(self, mock_openai_client: MagicMock) -> None:
         assert openai_module.client is mock_openai_client
 
-    def test_happy_default_text_completion(self, mock_openai_client: MagicMock) -> None:
+    async def test_happy_default_text_completion(self, mock_openai_client: MagicMock) -> None:
         messages = [{"role": "user", "content": "Hello"}]
 
-        response = openai_module.client.chat.completions.create(
+        response = await openai_module.client.chat.completions.create(
             model=settings.OLLAMA_MODEL_NAME,
             messages=messages,
         )
@@ -30,12 +31,12 @@ class TestMockedOpenAIClient:
         message = response.choices[0].message
         assert message.content == "Say Hello."
         assert message.tool_calls is None
-        mock_openai_client.chat.completions.create.assert_called_once_with(
+        mock_openai_client.chat.completions.create.assert_awaited_once_with(
             model=settings.OLLAMA_MODEL_NAME,
             messages=messages,
         )
 
-    def test_happy_tool_call_response(self, mock_openai_client: MagicMock) -> None:
+    async def test_happy_tool_call_response(self, mock_openai_client: MagicMock) -> None:
         tool_call = MagicMock()
         tool_call.id = "call_001"
         tool_call.type = "function"
@@ -46,7 +47,7 @@ class TestMockedOpenAIClient:
         mock_message.content = None
         mock_message.tool_calls = [tool_call]
 
-        response = openai_module.client.chat.completions.create(
+        response = await openai_module.client.chat.completions.create(
             model=settings.OLLAMA_MODEL_NAME,
             messages=[{"role": "user", "content": "Inspect schema.sql"}],
         )
@@ -56,12 +57,13 @@ class TestMockedOpenAIClient:
         assert len(returned_msg.tool_calls) == 1
         assert returned_msg.tool_calls[0].function.name == "read_file_slice"
         assert json.loads(returned_msg.tool_calls[0].function.arguments)["path"] == "src/schema.sql"
+        mock_openai_client.chat.completions.create.assert_awaited_once()
 
-    def test_sad_completion_raises_openai_error(self, mock_openai_client: MagicMock) -> None:
+    async def test_sad_completion_raises_openai_error(self, mock_openai_client: MagicMock) -> None:
         mock_openai_client.chat.completions.create.side_effect = OpenAIError("Provider unavailable")
 
         with pytest.raises(OpenAIError, match="Provider unavailable"):
-            openai_module.client.chat.completions.create(
+            await openai_module.client.chat.completions.create(
                 model=settings.OLLAMA_MODEL_NAME,
                 messages=[{"role": "user", "content": "Trigger failure"}],
             )
@@ -72,31 +74,38 @@ class TestMockedOpenAIClient:
 # =======================================================
 
 
+@pytest.mark.anyio
 class TestOpenAIClientConfig:
-    def test_happy_initializes_with_configured_url_and_secret_key(
+    async def test_happy_initializes_with_configured_url_and_secret_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(settings, "OLLAMA_PROVIDER_URL", "https://example.test/v1")
         monkeypatch.setattr(settings, "OLLAMA_API_KEY", SecretStr("test-secret-key"))
 
+        reloaded = None
         try:
             reloaded = importlib.reload(openai_module)
-            assert isinstance(reloaded.client, OpenAI)
+            assert isinstance(reloaded.client, AsyncOpenAI)
             assert str(reloaded.client.base_url).rstrip("/") == "https://example.test/v1"
             assert reloaded.client.api_key == "test-secret-key"
         finally:
+            if reloaded is not None:
+                await reloaded.client.close()
             monkeypatch.undo()
             importlib.reload(openai_module)
 
-    def test_edge_falls_back_to_ollama_key_when_api_key_is_none(
+    async def test_edge_falls_back_to_ollama_key_when_api_key_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(settings, "OLLAMA_API_KEY", None)
 
+        reloaded = None
         try:
             reloaded = importlib.reload(openai_module)
-            assert isinstance(reloaded.client, OpenAI)
+            assert isinstance(reloaded.client, AsyncOpenAI)
             assert reloaded.client.api_key == "ollama"
         finally:
+            if reloaded is not None:
+                await reloaded.client.close()
             monkeypatch.undo()
             importlib.reload(openai_module)

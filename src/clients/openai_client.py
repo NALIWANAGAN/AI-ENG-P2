@@ -1,8 +1,8 @@
 from core.settings import settings
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # Initialize the client pointing to Ollama Cloud
-client = OpenAI(
+client = AsyncOpenAI(
     base_url=settings.OLLAMA_PROVIDER_URL,
     api_key=(
         settings.OLLAMA_API_KEY.get_secret_value()

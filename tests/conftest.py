@@ -1,11 +1,17 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import clients.openai_client as openai_module
 import pytest
 
 
 @pytest.fixture
+def anyio_backend():
+    """Run @pytest.mark.anyio tests on asyncio only (trio is not installed)."""
+    return "asyncio"
+
+
+@pytest.fixture
 def mock_openai_client(monkeypatch):
-    """Unit test fixture: replaces the module-level OpenAI client with a MagicMock."""
+    """Unit test fixture: replaces the module-level AsyncOpenAI client with a mock."""
     mock_client = MagicMock()
 
     # Default text completion response
@@ -19,7 +25,7 @@ def mock_openai_client(monkeypatch):
     mock_response = MagicMock()
     mock_response.choices = [mock_choice]
 
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
 
     monkeypatch.setattr(openai_module, "client", mock_client)
     return mock_client

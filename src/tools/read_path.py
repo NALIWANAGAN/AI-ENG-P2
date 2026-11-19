@@ -22,8 +22,9 @@ reader = ReadPath()
     title="List Folder Content",
     name="list_folder_content",
     description=(
-        "List all unignored files under `request.path`. "
-        "This tool is useful to analyze the project directory at a high level."
+        "List unignored relative file paths under `request.path` in paginated batches. "
+        "Use this first when starting a repository audit to map project structure and locate schema/code files. "
+        "If `has_more` is true, call again with `batch + 1`."
     ),
     output_schema=FileContentPublic.model_json_schema()
 )
@@ -44,7 +45,11 @@ async def list_folder_content_tool(
 @mcp.tool(
     title="Read File Slice",
     name="read_file_slice",
-    description="Read a targeted 1-indexed line range from a file, capped by `request.max_tokens`.",
+    description=(
+        "Read a 1-indexed inclusive line range from a UTF-8 file, automatically capped to the server's token budget. "
+        "Prefer `search_symbol` first to locate line numbers in large code files, or start at `line_start=1` for schema files. "
+        "If `has_more` is true, call again with `line_start` set to `next_line`."
+    ),
     output_schema=FileContentPublic.model_json_schema()
 )
 async def read_file_slice_tool(
@@ -61,9 +66,12 @@ async def read_file_slice_tool(
 @mcp.tool(
     title="Search Symbol",
     name="search_symbol",
-    description="""Search for a symbol (table, column, function, class, etc.) across a file or directory.
-    Respects `.gitignore`, skips binary files, supports `'all'` (text/SQL/dict/code) and
-    `'definitions'` (Python/SQL/JS/TS/Prisma declarations) modes, and applies batch + token caps.""",
+    description=(
+        "Search for a symbol (table, column, function, class, etc.) across a file or directory; "
+        "use `mode='all'` for SQL strings/usages or `mode='definitions'` for declarations/DDL. "
+        "Use the returned `path` and `lines` with `read_file_slice` (passing a `line_start`..`line_end` window around each hit) to inspect context. "
+        "If `has_more` is true, call `search_symbol` again with `batch + 1`."
+    ),
     output_schema=SearchSymbolPublicResult.model_json_schema()
 )
 async def search_symbol_tool(

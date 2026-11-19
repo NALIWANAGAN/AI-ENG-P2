@@ -65,4 +65,4 @@ jobs:
       - name: Smoke test container imports
         run: |
           docker run --rm codebase-schema-auditor:ci \
-            python -c "from services.read_path import ReadFile; from schema.read_path import ReadFileSliceRequest; print('Container OK')"
+            python -c "from services.read_path import ReadPath; from schema.read_path import ReadFileSliceRequest; print('Container OK')"

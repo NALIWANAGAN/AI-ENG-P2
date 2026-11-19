@@ -12,7 +12,7 @@ from schema.read_path import (
     SearchSymbolRequest,
     SearchSymbolResult,
 )
-from services.read_path import ReadFile
+from services.read_path import ReadPath
 
 
 @pytest.fixture
@@ -127,30 +127,30 @@ def sample_repo(tmp_path: Path) -> dict[str, Path]:
 
 
 @pytest.fixture
-def reader(sample_repo: dict[str, Path]) -> ReadFile:
-    return ReadFile(root_dir=sample_repo["project"])
+def reader(sample_repo: dict[str, Path]) -> ReadPath:
+    return ReadPath(root_dir=sample_repo["project"])
 
 
 # =======================================================
 # Initialization Tests
 # =======================================================
 
-class TestReadFileInit:
+class TestReadPathInit:
     def test_init_with_valid_root_dir(self, sample_repo: dict[str, Path]) -> None:
-        rf = ReadFile(root_dir=sample_repo["project"])
+        rf = ReadPath(root_dir=sample_repo["project"])
         assert rf.root_dir == sample_repo["project"].resolve()
 
     def test_init_defaults_to_cwd(self) -> None:
-        rf = ReadFile()
+        rf = ReadPath()
         assert rf.root_dir == Path.cwd().resolve()
 
     def test_init_missing_root_raises_file_not_found(self, sample_repo: dict[str, Path]) -> None:
         with pytest.raises(FileNotFoundError):
-            ReadFile(root_dir=sample_repo["base"] / "does_not_exist")
+            ReadPath(root_dir=sample_repo["base"] / "does_not_exist")
 
     def test_init_file_as_root_raises_not_a_directory(self, sample_repo: dict[str, Path]) -> None:
         with pytest.raises(NotADirectoryError):
-            ReadFile(root_dir=sample_repo["project"] / "empty.txt")
+            ReadPath(root_dir=sample_repo["project"] / "empty.txt")
 
 
 # =======================================================
@@ -158,7 +158,7 @@ class TestReadFileInit:
 # =======================================================
 
 class TestListFolderContent:
-    def test_happy_lists_unignored_files_respecting_gitignore(self, reader: ReadFile) -> None:
+    def test_happy_lists_unignored_files_respecting_gitignore(self, reader: ReadPath) -> None:
         res = reader.list_folder_content(ListFolderRequest(path="."))
 
         assert isinstance(res, FileContent)
@@ -187,7 +187,7 @@ class TestListFolderContent:
         assert "src/build/generated.py" not in listed
 
     def test_happy_subdirectory_returns_root_relative_paths_and_applies_root_gitignore(
-        self, reader: ReadFile
+        self, reader: ReadPath
     ) -> None:
         res = reader.list_folder_content(ListFolderRequest(path="src"))
         listed = (res.content or "").splitlines()
@@ -197,7 +197,7 @@ class TestListFolderContent:
         file_res = reader.read_file_slice(ReadFileSliceRequest(path=listed[0]))
         assert "OrderRepo" in (file_res.content or "")
 
-    def test_happy_pagination_across_batches(self, reader: ReadFile) -> None:
+    def test_happy_pagination_across_batches(self, reader: ReadPath) -> None:
         page1 = reader.list_folder_content(ListFolderRequest(path=".", batch=1, items_per_batch=3))
         page2 = reader.list_folder_content(ListFolderRequest(path=".", batch=2, items_per_batch=3))
 
@@ -207,7 +207,7 @@ class TestListFolderContent:
         assert page1.total_line_count == page2.total_line_count
         assert set((page1.content or "").splitlines()).isdisjoint((page2.content or "").splitlines())
 
-    def test_edge_empty_directory(self, reader: ReadFile) -> None:
+    def test_edge_empty_directory(self, reader: ReadPath) -> None:
         res = reader.list_folder_content(ListFolderRequest(path="empty_dir"))
         assert res.content == ""
         assert res.total_line_count == 0
@@ -215,25 +215,25 @@ class TestListFolderContent:
         assert res.token_size == 0
         assert res.has_more is False
 
-    def test_edge_out_of_range_batch(self, reader: ReadFile) -> None:
+    def test_edge_out_of_range_batch(self, reader: ReadPath) -> None:
         res = reader.list_folder_content(ListFolderRequest(path=".", batch=99, items_per_batch=50))
         assert res.content == ""
         assert res.line_read is None
         assert res.token_size == 0
         assert res.has_more is False
 
-    def test_edge_max_tokens_caps_directory_output(self, reader: ReadFile) -> None:
+    def test_edge_max_tokens_caps_directory_output(self, reader: ReadPath) -> None:
         res = reader.list_folder_content(
             ListFolderRequest(path=".", batch=1, items_per_batch=100, max_tokens=10)
         )
         assert res.token_size <= 10
         assert res.has_more is True
 
-    def test_sad_file_path_raises_not_a_directory_error(self, reader: ReadFile) -> None:
+    def test_sad_file_path_raises_not_a_directory_error(self, reader: ReadPath) -> None:
         with pytest.raises(NotADirectoryError):
             reader.list_folder_content(ListFolderRequest(path="src/repo.py"))
 
-    def test_sad_missing_path_raises_file_not_found_error(self, reader: ReadFile) -> None:
+    def test_sad_missing_path_raises_file_not_found_error(self, reader: ReadPath) -> None:
         with pytest.raises(FileNotFoundError):
             reader.list_folder_content(ListFolderRequest(path="missing_folder"))
 
@@ -254,8 +254,8 @@ class TestListFolderContent:
 # read_file_slice Tests
 # =======================================================
 
-class TestReadFileSlice:
-    def test_happy_reads_exact_inclusive_line_range_and_next_line(self, reader: ReadFile) -> None:
+class TestReadPathSlice:
+    def test_happy_reads_exact_inclusive_line_range_and_next_line(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(
             ReadFileSliceRequest(path="long_file.txt", line_start=10, line_end=15)
         )
@@ -275,7 +275,7 @@ class TestReadFileSlice:
         assert cont.line_read == "l16-20"
         assert (cont.content or "").splitlines()[0].startswith("line 16:")
 
-    def test_happy_default_line_start_and_line_end_and_end_past_eof(self, reader: ReadFile) -> None:
+    def test_happy_default_line_start_and_line_end_and_end_past_eof(self, reader: ReadPath) -> None:
         from_top = reader.read_file_slice(ReadFileSliceRequest(path="long_file.txt"))
         assert from_top.line_read == "l1-50"
         assert from_top.has_more is False
@@ -296,14 +296,14 @@ class TestReadFileSlice:
         assert res_default.next_line is None
 
     def test_happy_accepts_absolute_path_inside_root(
-        self, reader: ReadFile, sample_repo: dict[str, Path]
+        self, reader: ReadPath, sample_repo: dict[str, Path]
     ) -> None:
         abs_file = sample_repo["project"] / "src" / "schema.sql"
         res = reader.read_file_slice(ReadFileSliceRequest(path=abs_file))
         assert "CREATE TABLE orders" in (res.content or "")
         assert res.metadata.file_name == "schema.sql"
 
-    def test_edge_empty_file(self, reader: ReadFile) -> None:
+    def test_edge_empty_file(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(ReadFileSliceRequest(path="empty.txt"))
         assert res.content == ""
         assert res.total_line_count == 0
@@ -312,7 +312,7 @@ class TestReadFileSlice:
         assert res.token_size == 0
         assert res.has_more is False
 
-    def test_edge_single_line_slice(self, reader: ReadFile) -> None:
+    def test_edge_single_line_slice(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(
             ReadFileSliceRequest(path="long_file.txt", line_start=5, line_end=5)
         )
@@ -321,7 +321,7 @@ class TestReadFileSlice:
         assert (res.content or "").startswith("line 05:")
         assert res.has_more is True
 
-    def test_edge_line_start_beyond_eof(self, reader: ReadFile) -> None:
+    def test_edge_line_start_beyond_eof(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(
             ReadFileSliceRequest(path="long_file.txt", line_start=100, line_end=120)
         )
@@ -330,7 +330,7 @@ class TestReadFileSlice:
         assert res.next_line is None
         assert res.has_more is False
 
-    def test_edge_token_budget_stops_early_and_sets_next_line(self, reader: ReadFile) -> None:
+    def test_edge_token_budget_stops_early_and_sets_next_line(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(
             ReadFileSliceRequest(path="long_file.txt", line_start=1, line_end=50, max_tokens=40)
         )
@@ -339,7 +339,7 @@ class TestReadFileSlice:
         assert res.line_read is not None and not res.line_read.endswith("-50")
         assert res.next_line is not None and res.next_line > 1
 
-    def test_edge_minified_single_line_truncates_within_token_budget(self, reader: ReadFile) -> None:
+    def test_edge_minified_single_line_truncates_within_token_budget(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(ReadFileSliceRequest(path="minified.js", max_tokens=50))
         assert res.line_read == "l1-1"
         assert (res.content or "").endswith("... [TRUNCATED]")
@@ -347,7 +347,7 @@ class TestReadFileSlice:
         assert res.has_more is False
         assert res.next_line is None
 
-    def test_edge_invalid_utf8_bytes_replaced_without_crashing(self, reader: ReadFile) -> None:
+    def test_edge_invalid_utf8_bytes_replaced_without_crashing(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(ReadFileSliceRequest(path="bad_utf8.txt"))
         assert "valid line" in (res.content or "")
         assert "\ufffd" in (res.content or "")
@@ -364,11 +364,11 @@ class TestReadFileSlice:
         with pytest.raises(ValidationError):
             ReadFileSliceRequest(**kwargs)
 
-    def test_sad_directory_raises_is_a_directory_error(self, reader: ReadFile) -> None:
+    def test_sad_directory_raises_is_a_directory_error(self, reader: ReadPath) -> None:
         with pytest.raises(IsADirectoryError):
             reader.read_file_slice(ReadFileSliceRequest(path="src", line_start=1, line_end=5))
 
-    def test_sad_missing_file_raises_file_not_found_error(self, reader: ReadFile) -> None:
+    def test_sad_missing_file_raises_file_not_found_error(self, reader: ReadPath) -> None:
         with pytest.raises(FileNotFoundError):
             reader.read_file_slice(ReadFileSliceRequest(path="nope.txt", line_start=1, line_end=5))
 
@@ -378,7 +378,7 @@ class TestReadFileSlice:
 # =======================================================
 class TestSearchSymbol:
     def test_happy_mode_all_catches_sql_dict_code_and_skips_ignored_and_binary(
-        self, reader: ReadFile
+        self, reader: ReadPath
     ) -> None:
         res = reader.search_symbol(SearchSymbolRequest(path=".", symbol="total_cents", mode="all"))
 
@@ -397,7 +397,7 @@ class TestSearchSymbol:
         assert "assets/logo.png" not in paths
 
     def test_happy_mode_definitions_finds_python_and_sql_declarations(
-        self, reader: ReadFile
+        self, reader: ReadPath
     ) -> None:
         col_defs = reader.search_symbol(
             SearchSymbolRequest(path="src", symbol="total_cents", mode="definitions")
@@ -419,7 +419,7 @@ class TestSearchSymbol:
         assert cls_defs.total_matches == 1
         assert cls_defs.results[0].lines == [1]
 
-    def test_happy_single_file_search_returns_root_relative_path(self, reader: ReadFile) -> None:
+    def test_happy_single_file_search_returns_root_relative_path(self, reader: ReadPath) -> None:
         res = reader.search_symbol(
             SearchSymbolRequest(path="src/repo.py", symbol="get_total", mode="definitions")
         )
@@ -427,7 +427,7 @@ class TestSearchSymbol:
         assert res.results[0].path == "src/repo.py"
         assert res.results[0].lines == [2]
 
-    def test_happy_file_extensions_filter_with_and_without_dot(self, reader: ReadFile) -> None:
+    def test_happy_file_extensions_filter_with_and_without_dot(self, reader: ReadPath) -> None:
         sql_no_dot = reader.search_symbol(
             SearchSymbolRequest(path=".", symbol="total_cents", file_extensions=["sql"])
         )
@@ -437,7 +437,7 @@ class TestSearchSymbol:
         assert [x.path for x in sql_no_dot.results] == ["src/schema.sql"]
         assert [x.path for x in sql_with_dot.results] == ["src/schema.sql"]
 
-    def test_happy_whole_word_and_case_sensitivity_and_regex(self, reader: ReadFile) -> None:
+    def test_happy_whole_word_and_case_sensitivity_and_regex(self, reader: ReadPath) -> None:
         # whole_word=True prevents 'id' matching 'valid'
         id_whole = reader.search_symbol(
             SearchSymbolRequest(path="src/repo.py", symbol="valid", whole_word=True)
@@ -469,7 +469,7 @@ class TestSearchSymbol:
         assert rx.total_matches == 2
 
     def test_edge_pagination_and_max_matches_per_file(
-        self, reader: ReadFile, sample_repo: dict[str, Path]
+        self, reader: ReadPath, sample_repo: dict[str, Path]
     ) -> None:
         noisy = sample_repo["project"] / "noisy.py"
         noisy.write_text("\n".join(f"v_{i} = total_cents + {i}" for i in range(1, 25)) + "\n", encoding="utf-8")
@@ -500,21 +500,21 @@ class TestSearchSymbol:
         assert p3.line_read == "l5-5"
         assert p3.has_more is False
 
-    def test_edge_long_line_snippet_is_centered_and_bounded(self, reader: ReadFile) -> None:
+    def test_edge_long_line_snippet_is_centered_and_bounded(self, reader: ReadPath) -> None:
         res = reader.search_symbol(SearchSymbolRequest(path="minified.js", symbol="total_cents"))
         snippet = res.results[0].matches[0].snippet
         assert "total_cents" in snippet
         assert snippet.startswith("...") and snippet.endswith("...")
-        assert len(snippet) <= ReadFile._SNIPPET_MAX_CHARS + 6
+        assert len(snippet) <= ReadPath._SNIPPET_MAX_CHARS + 6
 
-    def test_edge_max_tokens_caps_search_matches(self, reader: ReadFile) -> None:
+    def test_edge_max_tokens_caps_search_matches(self, reader: ReadPath) -> None:
         res = reader.search_symbol(
             SearchSymbolRequest(path=".", symbol="total_cents", max_tokens=20)
         )
         assert res.token_size <= 20
         assert res.has_more is True
 
-    def test_edge_no_matches_and_out_of_range_batch(self, reader: ReadFile) -> None:
+    def test_edge_no_matches_and_out_of_range_batch(self, reader: ReadPath) -> None:
         empty = reader.search_symbol(SearchSymbolRequest(path=".", symbol="nonexistent_xyz_symbol"))
         assert empty.total_matches == 0
         assert empty.total_files_matched == 0
@@ -544,11 +544,11 @@ class TestSearchSymbol:
         with pytest.raises(ValidationError):
             SearchSymbolRequest(**kwargs)
 
-    def test_sad_invalid_regex_raises_value_error(self, reader: ReadFile) -> None:
+    def test_sad_invalid_regex_raises_value_error(self, reader: ReadPath) -> None:
         with pytest.raises(ValueError, match="Invalid regex pattern"):
             reader.search_symbol(SearchSymbolRequest(path=".", symbol="[unclosed", use_regex=True))
 
-    def test_sad_missing_path_raises_file_not_found_error(self, reader: ReadFile) -> None:
+    def test_sad_missing_path_raises_file_not_found_error(self, reader: ReadPath) -> None:
         with pytest.raises(FileNotFoundError):
             reader.search_symbol(SearchSymbolRequest(path="src/missing.py", symbol="orders"))
 
@@ -570,7 +570,7 @@ class TestPathConfinementGuardrail:
         ],
     )
     def test_sad_escape_attempts_raise_permission_error_on_all_methods(
-        self, reader: ReadFile, sample_repo: dict[str, Path], escape_kind: str
+        self, reader: ReadPath, sample_repo: dict[str, Path], escape_kind: str
     ) -> None:
         sibling = sample_repo["sibling_secret"]
         paths_map = {
@@ -589,12 +589,12 @@ class TestPathConfinementGuardrail:
         with pytest.raises(PermissionError):
             reader.search_symbol(SearchSymbolRequest(path=bad_path, symbol="orders"))
 
-    def test_sad_null_byte_path_raises_value_error(self, reader: ReadFile) -> None:
+    def test_sad_null_byte_path_raises_value_error(self, reader: ReadPath) -> None:
         with pytest.raises(ValueError, match="null bytes"):
             reader.read_file_slice(ReadFileSliceRequest(path="src/repo.py\x00.txt"))
 
     def test_edge_symlink_escape_is_blocked_and_skipped(
-        self, reader: ReadFile, sample_repo: dict[str, Path]
+        self, reader: ReadPath, sample_repo: dict[str, Path]
     ) -> None:
         link_path = sample_repo["project"] / "escape_link.txt"
         target_outside = sample_repo["sibling_secret"] / "outside.txt"
@@ -619,7 +619,7 @@ class TestPathConfinementGuardrail:
 
 
 class TestTokenizerAndMetadata:
-    def test_happy_encoder_branch_counts_and_truncates(self, reader: ReadFile) -> None:
+    def test_happy_encoder_branch_counts_and_truncates(self, reader: ReadPath) -> None:
         class ByteEncoder:
             def encode(self, text: str, disallowed_special: tuple = ()) -> list[int]:
                 return list(text.encode("utf-8"))
@@ -635,7 +635,7 @@ class TestTokenizerAndMetadata:
         assert (res.content or "").endswith("... [TRUNCATED]")
         assert res.token_size <= 30
 
-    def test_happy_offline_fallback_branch_counts_and_truncates(self, reader: ReadFile) -> None:
+    def test_happy_offline_fallback_branch_counts_and_truncates(self, reader: ReadPath) -> None:
         reader._encoder = None
         assert reader._count_tokens("abcdefgh") == 2
         assert reader._count_tokens("") == 0
@@ -644,7 +644,7 @@ class TestTokenizerAndMetadata:
         assert (res.content or "").endswith("... [TRUNCATED]")
         assert res.token_size <= 30
 
-    def test_happy_metadata_excluded_cleanly_for_llm_payload(self, reader: ReadFile) -> None:
+    def test_happy_metadata_excluded_cleanly_for_llm_payload(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(ReadFileSliceRequest(path="src/repo.py"))
         assert res.metadata.file_name == "repo.py"
         assert res.metadata.modification_date is not None

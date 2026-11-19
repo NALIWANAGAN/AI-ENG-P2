@@ -17,7 +17,7 @@ from schema.read_path import (
 )
 
 
-class ReadFile:
+class ReadPath:
     _TRUNCATION_SUFFIX = "... [TRUNCATED]"
     _SNIPPET_MAX_CHARS = 200
     _SQL_COLUMN_TYPES = (

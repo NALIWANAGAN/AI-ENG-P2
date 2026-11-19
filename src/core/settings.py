@@ -23,5 +23,13 @@ class Settings(BaseSettings):
     # SQLGlot
     SQLGLOT_DB_DIALECT: str = "postgres"
 
+    # File & Directory Read Guardrails
+    DEFAULT_LINES_PER_BATCH: int = 200
+    DEFAULT_ITEMS_PER_BATCH: int = 100
+    DEFAULT_SEARCH_MATCHES_PER_BATCH: int = 50
+    DEFAULT_MAX_MATCHES_PER_FILE: int = 20
+    MAX_READ_TOKENS: int = 4000
+    TOKENIZER_ENCODING: str = "o200k_base"
+
 
 settings = Settings()

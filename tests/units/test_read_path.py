@@ -152,6 +152,21 @@ class TestReadPathInit:
         with pytest.raises(NotADirectoryError):
             ReadPath(root_dir=sample_repo["project"] / "empty.txt")
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"max_tokens": 0},
+            {"items_per_batch": 0},
+            {"matches_per_batch": 0},
+            {"max_matches_per_file": 0},
+        ],
+    )
+    def test_sad_invalid_guardrails_raise_value_error(
+        self, sample_repo: dict[str, Path], kwargs: dict
+    ) -> None:
+        with pytest.raises(ValueError):
+            ReadPath(root_dir=sample_repo["project"], **kwargs)
+
 
 # =======================================================
 # list_folder_content Tests
@@ -197,9 +212,10 @@ class TestListFolderContent:
         file_res = reader.read_file_slice(ReadFileSliceRequest(path=listed[0]))
         assert "OrderRepo" in (file_res.content or "")
 
-    def test_happy_pagination_across_batches(self, reader: ReadPath) -> None:
-        page1 = reader.list_folder_content(ListFolderRequest(path=".", batch=1, items_per_batch=3))
-        page2 = reader.list_folder_content(ListFolderRequest(path=".", batch=2, items_per_batch=3))
+    def test_happy_pagination_across_batches(self, sample_repo: dict[str, Path]) -> None:
+        paged_reader = ReadPath(root_dir=sample_repo["project"], items_per_batch=3)
+        page1 = paged_reader.list_folder_content(ListFolderRequest(path=".", batch=1))
+        page2 = paged_reader.list_folder_content(ListFolderRequest(path=".", batch=2))
 
         assert page1.line_read == "l1-3"
         assert page1.has_more is True
@@ -216,16 +232,15 @@ class TestListFolderContent:
         assert res.has_more is False
 
     def test_edge_out_of_range_batch(self, reader: ReadPath) -> None:
-        res = reader.list_folder_content(ListFolderRequest(path=".", batch=99, items_per_batch=50))
+        res = reader.list_folder_content(ListFolderRequest(path=".", batch=99))
         assert res.content == ""
         assert res.line_read is None
         assert res.token_size == 0
         assert res.has_more is False
 
-    def test_edge_max_tokens_caps_directory_output(self, reader: ReadPath) -> None:
-        res = reader.list_folder_content(
-            ListFolderRequest(path=".", batch=1, items_per_batch=100, max_tokens=10)
-        )
+    def test_edge_max_tokens_caps_directory_output(self, sample_repo: dict[str, Path]) -> None:
+        capped_reader = ReadPath(root_dir=sample_repo["project"], max_tokens=10)
+        res = capped_reader.list_folder_content(ListFolderRequest(path=".", batch=1))
         assert res.token_size <= 10
         assert res.has_more is True
 
@@ -237,17 +252,9 @@ class TestListFolderContent:
         with pytest.raises(FileNotFoundError):
             reader.list_folder_content(ListFolderRequest(path="missing_folder"))
 
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"path": ".", "batch": 0},
-            {"path": ".", "items_per_batch": 0},
-            {"path": ".", "max_tokens": 0},
-        ],
-    )
-    def test_sad_invalid_request_params_raise_validation_error(self, kwargs: dict) -> None:
+    def test_sad_invalid_request_params_raise_validation_error(self) -> None:
         with pytest.raises(ValidationError):
-            ListFolderRequest(**kwargs)
+            ListFolderRequest(path=".", batch=0)
 
 
 # =======================================================
@@ -330,17 +337,23 @@ class TestReadPathSlice:
         assert res.next_line is None
         assert res.has_more is False
 
-    def test_edge_token_budget_stops_early_and_sets_next_line(self, reader: ReadPath) -> None:
-        res = reader.read_file_slice(
-            ReadFileSliceRequest(path="long_file.txt", line_start=1, line_end=50, max_tokens=40)
+    def test_edge_token_budget_stops_early_and_sets_next_line(
+        self, sample_repo: dict[str, Path]
+    ) -> None:
+        capped_reader = ReadPath(root_dir=sample_repo["project"], max_tokens=40)
+        res = capped_reader.read_file_slice(
+            ReadFileSliceRequest(path="long_file.txt", line_start=1, line_end=50)
         )
         assert res.token_size <= 40
         assert res.has_more is True
         assert res.line_read is not None and not res.line_read.endswith("-50")
         assert res.next_line is not None and res.next_line > 1
 
-    def test_edge_minified_single_line_truncates_within_token_budget(self, reader: ReadPath) -> None:
-        res = reader.read_file_slice(ReadFileSliceRequest(path="minified.js", max_tokens=50))
+    def test_edge_minified_single_line_truncates_within_token_budget(
+        self, sample_repo: dict[str, Path]
+    ) -> None:
+        capped_reader = ReadPath(root_dir=sample_repo["project"], max_tokens=50)
+        res = capped_reader.read_file_slice(ReadFileSliceRequest(path="minified.js"))
         assert res.line_read == "l1-1"
         assert (res.content or "").endswith("... [TRUNCATED]")
         assert res.token_size <= 50
@@ -357,7 +370,6 @@ class TestReadPathSlice:
         [
             {"path": "long_file.txt", "line_start": 0},
             {"path": "long_file.txt", "line_start": 20, "line_end": 10},
-            {"path": "long_file.txt", "max_tokens": 0},
         ],
     )
     def test_sad_invalid_request_params_raise_validation_error(self, kwargs: dict) -> None:
@@ -469,33 +481,26 @@ class TestSearchSymbol:
         assert rx.total_matches == 2
 
     def test_edge_pagination_and_max_matches_per_file(
-        self, reader: ReadPath, sample_repo: dict[str, Path]
+        self, sample_repo: dict[str, Path]
     ) -> None:
         noisy = sample_repo["project"] / "noisy.py"
         noisy.write_text("\n".join(f"v_{i} = total_cents + {i}" for i in range(1, 25)) + "\n", encoding="utf-8")
 
-        p1 = reader.search_symbol(
-            SearchSymbolRequest(
-                path="noisy.py",
-                symbol="total_cents",
-                max_matches_per_file=5,
-                matches_per_batch=2,
-                batch=1,
-            )
+        paged_reader = ReadPath(
+            root_dir=sample_repo["project"],
+            max_matches_per_file=5,
+            matches_per_batch=2,
+        )
+        p1 = paged_reader.search_symbol(
+            SearchSymbolRequest(path="noisy.py", symbol="total_cents", batch=1)
         )
         assert p1.total_matches == 5
         assert p1.results[0].truncated_in_file is True
         assert p1.line_read == "l1-2"
         assert p1.has_more is True
 
-        p3 = reader.search_symbol(
-            SearchSymbolRequest(
-                path="noisy.py",
-                symbol="total_cents",
-                max_matches_per_file=5,
-                matches_per_batch=2,
-                batch=3,
-            )
+        p3 = paged_reader.search_symbol(
+            SearchSymbolRequest(path="noisy.py", symbol="total_cents", batch=3)
         )
         assert p3.line_read == "l5-5"
         assert p3.has_more is False
@@ -507,10 +512,9 @@ class TestSearchSymbol:
         assert snippet.startswith("...") and snippet.endswith("...")
         assert len(snippet) <= ReadPath._SNIPPET_MAX_CHARS + 6
 
-    def test_edge_max_tokens_caps_search_matches(self, reader: ReadPath) -> None:
-        res = reader.search_symbol(
-            SearchSymbolRequest(path=".", symbol="total_cents", max_tokens=20)
-        )
+    def test_edge_max_tokens_caps_search_matches(self, sample_repo: dict[str, Path]) -> None:
+        capped_reader = ReadPath(root_dir=sample_repo["project"], max_tokens=20)
+        res = capped_reader.search_symbol(SearchSymbolRequest(path=".", symbol="total_cents"))
         assert res.token_size <= 20
         assert res.has_more is True
 
@@ -535,9 +539,6 @@ class TestSearchSymbol:
             {"path": ".", "symbol": ""},
             {"path": ".", "symbol": "   "},
             {"path": ".", "symbol": "orders", "batch": 0},
-            {"path": ".", "symbol": "orders", "matches_per_batch": 0},
-            {"path": ".", "symbol": "orders", "max_matches_per_file": 0},
-            {"path": ".", "symbol": "orders", "max_tokens": 0},
         ],
     )
     def test_sad_invalid_request_params_raise_validation_error(self, kwargs: dict) -> None:
@@ -619,7 +620,9 @@ class TestPathConfinementGuardrail:
 
 
 class TestTokenizerAndMetadata:
-    def test_happy_encoder_branch_counts_and_truncates(self, reader: ReadPath) -> None:
+    def test_happy_encoder_branch_counts_and_truncates(
+        self, sample_repo: dict[str, Path]
+    ) -> None:
         class ByteEncoder:
             def encode(self, text: str, disallowed_special: tuple = ()) -> list[int]:
                 return list(text.encode("utf-8"))
@@ -627,20 +630,24 @@ class TestTokenizerAndMetadata:
             def decode(self, tokens: list[int]) -> str:
                 return bytes(tokens).decode("utf-8", errors="ignore")
 
-        reader._encoder = ByteEncoder()
-        assert reader._count_tokens("hello") == 5
-        assert reader._count_tokens("") == 0
+        capped_reader = ReadPath(root_dir=sample_repo["project"], max_tokens=30)
+        capped_reader._encoder = ByteEncoder()
+        assert capped_reader._count_tokens("hello") == 5
+        assert capped_reader._count_tokens("") == 0
 
-        res = reader.read_file_slice(ReadFileSliceRequest(path="minified.js", max_tokens=30))
+        res = capped_reader.read_file_slice(ReadFileSliceRequest(path="minified.js"))
         assert (res.content or "").endswith("... [TRUNCATED]")
         assert res.token_size <= 30
 
-    def test_happy_offline_fallback_branch_counts_and_truncates(self, reader: ReadPath) -> None:
-        reader._encoder = None
-        assert reader._count_tokens("abcdefgh") == 2
-        assert reader._count_tokens("") == 0
+    def test_happy_offline_fallback_branch_counts_and_truncates(
+        self, sample_repo: dict[str, Path]
+    ) -> None:
+        capped_reader = ReadPath(root_dir=sample_repo["project"], max_tokens=30)
+        capped_reader._encoder = None
+        assert capped_reader._count_tokens("abcdefgh") == 2
+        assert capped_reader._count_tokens("") == 0
 
-        res = reader.read_file_slice(ReadFileSliceRequest(path="minified.js", max_tokens=30))
+        res = capped_reader.read_file_slice(ReadFileSliceRequest(path="minified.js"))
         assert (res.content or "").endswith("... [TRUNCATED]")
         assert res.token_size <= 30
 

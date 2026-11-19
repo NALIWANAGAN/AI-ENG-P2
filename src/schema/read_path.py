@@ -22,16 +22,6 @@ class ListFolderRequest(BaseModel):
         ge=1,
         description="1-indexed batch number to fetch when directory contents are paginated.",
     )
-    items_per_batch: int = Field(
-        default=settings.DEFAULT_ITEMS_PER_BATCH,
-        ge=1,
-        description="Maximum number of file paths returned per batch.",
-    )
-    max_tokens: int = Field(
-        default=settings.MAX_READ_TOKENS,
-        ge=1,
-        description="Maximum token budget allowed for the returned listing.",
-    )
 
 
 class ReadFileSliceRequest(BaseModel):
@@ -49,11 +39,6 @@ class ReadFileSliceRequest(BaseModel):
         default=None,
         ge=1,
         description=f"1-indexed ending line number (inclusive). Defaults to line_start + {settings.DEFAULT_LINES_PER_BATCH} - 1.",
-    )
-    max_tokens: int = Field(
-        default=settings.MAX_READ_TOKENS,
-        ge=1,
-        description="Maximum token budget allowed for the returned slice.",
     )
 
     @model_validator(mode="after")
@@ -97,25 +82,6 @@ class SearchSymbolRequest(BaseModel):
         default=1,
         ge=1,
         description="1-indexed batch number for paginated search matches.",
-    )
-    matches_per_batch: int = Field(
-        default=settings.DEFAULT_SEARCH_MATCHES_PER_BATCH,
-        ge=1,
-        description="Maximum number of matches returned per batch.",
-    )
-    max_matches_per_file: int = Field(
-        default=settings.DEFAULT_MAX_MATCHES_PER_FILE,
-        ge=1,
-        description="Maximum number of matches collected from a single file before truncating.",
-    )
-    max_tokens: int = Field(
-        default=settings.MAX_READ_TOKENS,
-        ge=1,
-        description="Maximum token budget allowed for the returned search matches.",
-    )
-    read_type: ReadType = Field(
-        default="search_symbol",
-        description="Read operation label recorded on the response.",
     )
 
     @field_validator("symbol")

@@ -30,13 +30,30 @@ class ReadPath:
     def __init__(
         self,
         root_dir: Path | str | None = None,
+        max_tokens: int = settings.MAX_READ_TOKENS,
+        items_per_batch: int = settings.DEFAULT_ITEMS_PER_BATCH,
+        matches_per_batch: int = settings.DEFAULT_SEARCH_MATCHES_PER_BATCH,
+        max_matches_per_file: int = settings.DEFAULT_MAX_MATCHES_PER_FILE,
         encoding_name: str = settings.TOKENIZER_ENCODING,
     ) -> None:
+        if max_tokens < 1:
+            raise ValueError("max_tokens must be >= 1")
+        if items_per_batch < 1:
+            raise ValueError("items_per_batch must be >= 1")
+        if matches_per_batch < 1:
+            raise ValueError("matches_per_batch must be >= 1")
+        if max_matches_per_file < 1:
+            raise ValueError("max_matches_per_file must be >= 1")
+
         base = Path(root_dir) if root_dir is not None else Path.cwd()
         self._validate_existence(base)
         if not base.is_dir():
             raise NotADirectoryError(f"Root path is not a directory: {base}")
         self._root_dir = base.resolve()
+        self._max_tokens = max_tokens
+        self._items_per_batch = items_per_batch
+        self._matches_per_batch = matches_per_batch
+        self._max_matches_per_file = max_matches_per_file
 
         try:
             self._encoder = tiktoken.get_encoding(encoding_name)
@@ -59,14 +76,14 @@ class ReadPath:
             for entry in self._auto_list_unignored_stdlib(root)
         )
 
-        line_start = (request.batch - 1) * request.items_per_batch + 1
-        line_end = request.batch * request.items_per_batch
+        line_start = (request.batch - 1) * self._items_per_batch + 1
+        line_end = request.batch * self._items_per_batch
 
         content, actual_start, actual_end, token_size, has_more = self._slice_lines_within_budget(
             lines=rel_paths,
             line_start=line_start,
             line_end=line_end,
-            max_tokens=request.max_tokens,
+            max_tokens=self._max_tokens,
         )
 
         return FileContent(
@@ -82,7 +99,7 @@ class ReadPath:
         )
 
     def read_file_slice(self, request: ReadFileSliceRequest) -> FileContent:
-        """Read a targeted 1-indexed line range from a UTF-8 file, capped by `request.max_tokens`."""
+        """Read a targeted 1-indexed line range from a UTF-8 file, capped by `self._max_tokens`."""
         path = self._resolve_and_validate_path(request.path)
         if path.is_dir():
             raise IsADirectoryError(f"Path is a directory, not a file: {request.path}")
@@ -100,7 +117,7 @@ class ReadPath:
             lines=lines,
             line_start=request.line_start,
             line_end=target_end,
-            max_tokens=request.max_tokens,
+            max_tokens=self._max_tokens,
         )
 
         return FileContent(
@@ -172,7 +189,7 @@ class ReadPath:
                 match = pattern.search(raw_line)
                 if match is None:
                     continue
-                if len(file_hits) >= request.max_matches_per_file:
+                if len(file_hits) >= self._max_matches_per_file:
                     truncated_in_file = True
                     break
                 file_hits.append((line_num, self._format_snippet(raw_line, match)))
@@ -183,14 +200,14 @@ class ReadPath:
                     flat_matches.append((rel_path, line_num, snippet, truncated_in_file))
 
         total_matches = len(flat_matches)
-        start_idx = (request.batch - 1) * request.matches_per_batch
-        end_idx = min(total_matches, request.batch * request.matches_per_batch)
+        start_idx = (request.batch - 1) * self._matches_per_batch
+        end_idx = min(total_matches, request.batch * self._matches_per_batch)
 
         if total_matches == 0 or start_idx >= total_matches:
             return SearchSymbolResult(
                 symbol=request.symbol,
                 mode=request.mode,
-                read_type=request.read_type,
+                read_type="search_symbol",
                 results=[],
                 total_matches=total_matches,
                 total_files_matched=len(matched_files),
@@ -208,12 +225,12 @@ class ReadPath:
             rel_path, line_num, snippet, _ = item
             entry_tokens = self._count_tokens(f"{rel_path}:{line_num}: {snippet}\n")
 
-            if selected_flat and (used_tokens + entry_tokens > request.max_tokens):
+            if selected_flat and (used_tokens + entry_tokens > self._max_tokens):
                 break
 
-            if not selected_flat and entry_tokens > request.max_tokens:
+            if not selected_flat and entry_tokens > self._max_tokens:
                 prefix_tokens = self._count_tokens(f"{rel_path}:{line_num}: ")
-                snippet_budget = max(1, request.max_tokens - prefix_tokens)
+                snippet_budget = max(1, self._max_tokens - prefix_tokens)
                 truncated_snippet = self._truncate_line_to_budget(snippet, snippet_budget)
                 item = (rel_path, line_num, truncated_snippet, item[3])
                 selected_flat.append(item)
@@ -250,7 +267,7 @@ class ReadPath:
         return SearchSymbolResult(
             symbol=request.symbol,
             mode=request.mode,
-            read_type=request.read_type,
+            read_type="search_symbol",
             results=results,
             total_matches=total_matches,
             total_files_matched=len(matched_files),

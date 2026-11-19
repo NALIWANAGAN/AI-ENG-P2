@@ -141,10 +141,20 @@ class TestMCPToolDiscovery:
             "search_symbol",
         }
 
+        hidden_guardrails = {
+            "max_tokens",
+            "items_per_batch",
+            "matches_per_batch",
+            "max_matches_per_file",
+        }
         for name, tool in tool_map.items():
             # FastMCP injects Context internally; it must never appear in the LLM input schema
             assert "ctx" not in tool.input_schema.get("properties", {}), name
             assert "request" in tool.input_schema.get("properties", {}), name
+
+            # Server-side guardrails must never be exposed for the LLM to override
+            req_props = tool.input_schema["properties"]["request"].get("properties", {})
+            assert hidden_guardrails.isdisjoint(req_props.keys()), (name, req_props.keys())
 
             # Output schema must never advertise internal audit `metadata`
             assert tool.output_schema is not None, name
@@ -196,19 +206,20 @@ class TestListFolderContentMCPIntegration:
         # Audit log emitted via ctx.info
         assert any("Listed directory:" in str(entry.data) for entry in logs)
 
-    async def test_happy_pagination_across_batches(self, mcp_reader: ReadPath) -> None:
+    async def test_happy_pagination_across_batches(
+        self, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            read_path_tools,
+            "reader",
+            ReadPath(root_dir=sample_mcp_repo["project"], items_per_batch=3),
+        )
         async with Client(read_path_tools.mcp) as client:
             p1 = _extract_payload(
-                await client.call_tool(
-                    "list_folder_content",
-                    {"request": {"path": ".", "batch": 1, "items_per_batch": 3}},
-                )
+                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 1}})
             )
             p2 = _extract_payload(
-                await client.call_tool(
-                    "list_folder_content",
-                    {"request": {"path": ".", "batch": 2, "items_per_batch": 3}},
-                )
+                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 2}})
             )
 
         assert p1["line_read"] == "l1-3"
@@ -218,23 +229,24 @@ class TestListFolderContentMCPIntegration:
         assert set(p1["content"].splitlines()).isdisjoint(p2["content"].splitlines())
 
     async def test_edge_empty_dir_out_of_range_batch_and_token_cap(
-        self, mcp_reader: ReadPath
+        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async with Client(read_path_tools.mcp) as client:
             empty = _extract_payload(
                 await client.call_tool("list_folder_content", {"request": {"path": "empty_dir"}})
             )
             oob = _extract_payload(
-                await client.call_tool(
-                    "list_folder_content",
-                    {"request": {"path": ".", "batch": 99, "items_per_batch": 50}},
-                )
+                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 99}})
             )
+
+        monkeypatch.setattr(
+            read_path_tools,
+            "reader",
+            ReadPath(root_dir=sample_mcp_repo["project"], max_tokens=10),
+        )
+        async with Client(read_path_tools.mcp) as client:
             capped = _extract_payload(
-                await client.call_tool(
-                    "list_folder_content",
-                    {"request": {"path": ".", "batch": 1, "items_per_batch": 100, "max_tokens": 10}},
-                )
+                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 1}})
             )
 
         assert empty["content"] == ""
@@ -255,8 +267,6 @@ class TestListFolderContentMCPIntegration:
             {"path": "src/repo.py"},  # File instead of directory
             {"path": "nonexistent_dir"},  # Missing directory
             {"path": ".", "batch": 0},  # Invalid batch bound
-            {"path": ".", "items_per_batch": 0},  # Invalid items_per_batch
-            {"path": ".", "max_tokens": 0},  # Invalid max_tokens
             {"path": ".."},  # Parent escape
             {"path": "../project_secret"},  # Sibling prefix escape
         ],
@@ -310,7 +320,7 @@ class TestReadFileSliceMCPIntegration:
         assert any("Read slice:" in str(entry.data) for entry in logs)
 
     async def test_edge_empty_eof_token_cap_minified_and_invalid_utf8(
-        self, mcp_reader: ReadPath
+        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async with Client(read_path_tools.mcp) as client:
             empty = _extract_payload(
@@ -322,26 +332,30 @@ class TestReadFileSliceMCPIntegration:
                     {"request": {"path": "long_file.txt", "line_start": 100, "line_end": 120}},
                 )
             )
+            bad_utf8 = _extract_payload(
+                await client.call_tool("read_file_slice", {"request": {"path": "bad_utf8.txt"}})
+            )
+
+        monkeypatch.setattr(
+            read_path_tools,
+            "reader",
+            ReadPath(root_dir=sample_mcp_repo["project"], max_tokens=40),
+        )
+        async with Client(read_path_tools.mcp) as client:
             capped = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
-                    {"request": {"path": "long_file.txt", "line_start": 1, "line_end": 50, "max_tokens": 40}},
+                    {"request": {"path": "long_file.txt", "line_start": 1, "line_end": 50}},
                 )
             )
             minified = _extract_payload(
-                await client.call_tool(
-                    "read_file_slice",
-                    {"request": {"path": "minified.js", "max_tokens": 50}},
-                )
-            )
-            bad_utf8 = _extract_payload(
-                await client.call_tool("read_file_slice", {"request": {"path": "bad_utf8.txt"}})
+                await client.call_tool("read_file_slice", {"request": {"path": "minified.js"}})
             )
 
         assert empty["content"] == "" and empty["total_line_count"] == 0 and empty["line_read"] is None
         assert beyond_eof["content"] == "" and beyond_eof["line_read"] is None and beyond_eof["has_more"] is False
         assert capped["token_size"] <= 40 and capped["has_more"] is True and capped["next_line"] is not None
-        assert minified["content"].endswith("... [TRUNCATED]") and minified["token_size"] <= 50
+        assert minified["content"].endswith("... [TRUNCATED]") and minified["token_size"] <= 40
         assert "valid line" in bad_utf8["content"] and "\ufffd" in bad_utf8["content"]
 
     @pytest.mark.parametrize(
@@ -351,7 +365,6 @@ class TestReadFileSliceMCPIntegration:
             {"path": "src/missing.py", "line_start": 1, "line_end": 5},  # Missing file
             {"path": "long_file.txt", "line_start": 0},  # Invalid line_start
             {"path": "long_file.txt", "line_start": 20, "line_end": 10},  # line_end < line_start
-            {"path": "long_file.txt", "max_tokens": 0},  # Invalid max_tokens
             {"path": "../project_secret/outside.txt"},  # Relative escape
             {"path": "src/../../project_secret/outside.txt"},  # Nested traversal escape
             {"path": "src/repo.py\x00.txt"},  # Null byte injection
@@ -420,7 +433,7 @@ class TestSearchSymbolMCPIntegration:
         assert any("Searched 'total_cents'" in str(entry.data) for entry in logs)
 
     async def test_edge_pagination_per_file_cap_token_cap_and_no_matches(
-        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path]
+        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         noisy = sample_mcp_repo["project"] / "noisy.py"
         noisy.write_text(
@@ -428,45 +441,45 @@ class TestSearchSymbolMCPIntegration:
             encoding="utf-8",
         )
 
+        monkeypatch.setattr(
+            read_path_tools,
+            "reader",
+            ReadPath(
+                root_dir=sample_mcp_repo["project"],
+                max_matches_per_file=5,
+                matches_per_batch=2,
+            ),
+        )
         async with Client(read_path_tools.mcp) as client:
             p1 = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {
-                        "request": {
-                            "path": "noisy.py",
-                            "symbol": "total_cents",
-                            "max_matches_per_file": 5,
-                            "matches_per_batch": 2,
-                            "batch": 1,
-                        }
-                    },
+                    {"request": {"path": "noisy.py", "symbol": "total_cents", "batch": 1}},
                 )
             )
             p3 = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {
-                        "request": {
-                            "path": "noisy.py",
-                            "symbol": "total_cents",
-                            "max_matches_per_file": 5,
-                            "matches_per_batch": 2,
-                            "batch": 3,
-                        }
-                    },
-                )
-            )
-            tok_capped = _extract_payload(
-                await client.call_tool(
-                    "search_symbol",
-                    {"request": {"path": ".", "symbol": "total_cents", "max_tokens": 20}},
+                    {"request": {"path": "noisy.py", "symbol": "total_cents", "batch": 3}},
                 )
             )
             no_hits = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
                     {"request": {"path": ".", "symbol": "nonexistent_xyz_symbol"}},
+                )
+            )
+
+        monkeypatch.setattr(
+            read_path_tools,
+            "reader",
+            ReadPath(root_dir=sample_mcp_repo["project"], max_tokens=20),
+        )
+        async with Client(read_path_tools.mcp) as client:
+            tok_capped = _extract_payload(
+                await client.call_tool(
+                    "search_symbol",
+                    {"request": {"path": ".", "symbol": "total_cents"}},
                 )
             )
 

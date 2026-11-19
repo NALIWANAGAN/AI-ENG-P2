@@ -138,8 +138,8 @@ class FileMetadata(BaseModel):
     modification_date: datetime | None = None
 
 
-class FileContent(BaseModel):
-    """File or directory read content and its audit metadata."""
+class FileContentPublic(BaseModel):
+    """LLM-facing file or directory read content (excludes internal audit metadata)."""
 
     content: str | None = Field(
         default=None,
@@ -174,6 +174,11 @@ class FileContent(BaseModel):
         default=False,
         description="True if more lines or entries remain after this read.",
     )
+
+
+class FileContent(FileContentPublic):
+    """File or directory read content and its audit metadata."""
+
     metadata: FileMetadata
 
 
@@ -209,8 +214,8 @@ class SearchSymbol(BaseModel):
     )
 
 
-class SearchSymbolResult(BaseModel):
-    """Paginated, token-capped symbol search response and its audit metadata."""
+class SearchSymbolPublicResult(BaseModel):
+    """LLM-facing paginated, token-capped symbol search response (excludes audit metadata)."""
 
     symbol: str = Field(description="Searched symbol or pattern.")
     mode: SearchMode = Field(description="Search mode used: 'all' or 'definitions'.")
@@ -247,4 +252,9 @@ class SearchSymbolResult(BaseModel):
         default=False,
         description="True if more matches remain after this batch.",
     )
+
+
+class SearchSymbolResult(SearchSymbolPublicResult):
+    """Paginated, token-capped symbol search response and its audit metadata."""
+
     metadata: FileMetadata

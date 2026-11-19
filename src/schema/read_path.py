@@ -48,7 +48,7 @@ class ReadFileSliceRequest(BaseModel):
     line_end: int | None = Field(
         default=None,
         ge=1,
-        description="1-indexed ending line number (inclusive). Defaults to line_start + DEFAULT_LINES_PER_BATCH - 1.",
+        description=f"1-indexed ending line number (inclusive). Defaults to line_start + {settings.DEFAULT_LINES_PER_BATCH} - 1.",
     )
     max_tokens: int = Field(
         default=settings.MAX_READ_TOKENS,

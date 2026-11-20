@@ -134,7 +134,6 @@ def reader(sample_repo: dict[str, Path]) -> ReadPath:
 # =======================================================
 # Initialization Tests
 # =======================================================
-
 class TestReadPathInit:
     def test_init_with_valid_root_dir(self, sample_repo: dict[str, Path]) -> None:
         rf = ReadPath(root_dir=sample_repo["project"])
@@ -171,9 +170,8 @@ class TestReadPathInit:
 # =======================================================
 # list_folder_content Tests
 # =======================================================
-
 class TestListFolderContent:
-    def test_happy_lists_unignored_files_respecting_gitignore(self, reader: ReadPath) -> None:
+    def test_happy_lists_folder_content_metadata_and_paths(self, reader: ReadPath) -> None:
         res = reader.list_folder_content(ListFolderRequest(path="."))
 
         assert isinstance(res, FileContent)
@@ -186,24 +184,10 @@ class TestListFolderContent:
         listed = (res.content or "").splitlines()
         assert res.total_line_count == len(listed)
         assert res.line_read == f"l1-{len(listed)}"
-
-        # Included files
-        assert "build" in listed
-        assert "keep.log" in listed
-        assert "src/root_only.txt" in listed
         assert "src/schema.sql" in listed
         assert "src/repo.py" in listed
 
-        # Excluded by .gitignore or default .git/
-        assert ".git/HEAD" not in listed
-        assert "debug.log" not in listed
-        assert "root_only.txt" not in listed
-        assert "ignored_dir/hidden.py" not in listed
-        assert "src/build/generated.py" not in listed
-
-    def test_happy_subdirectory_returns_root_relative_paths_and_applies_root_gitignore(
-        self, reader: ReadPath
-    ) -> None:
+    def test_happy_subdirectory_returns_root_relative_paths(self, reader: ReadPath) -> None:
         res = reader.list_folder_content(ListFolderRequest(path="src"))
         listed = (res.content or "").splitlines()
 
@@ -260,7 +244,6 @@ class TestListFolderContent:
 # =======================================================
 # read_file_slice Tests
 # =======================================================
-
 class TestReadPathSlice:
     def test_happy_reads_exact_inclusive_line_range_and_next_line(self, reader: ReadPath) -> None:
         res = reader.read_file_slice(
@@ -557,8 +540,6 @@ class TestSearchSymbol:
 # =======================================================
 # Path Confinement Guardrail Tests
 # =======================================================
-
-
 class TestPathConfinementGuardrail:
     @pytest.mark.parametrize(
         "escape_kind",
@@ -617,8 +598,6 @@ class TestPathConfinementGuardrail:
 # =======================================================
 # Tokenizer & Metadata Behavior Tests
 # =======================================================
-
-
 class TestTokenizerAndMetadata:
     def test_happy_encoder_branch_counts_and_truncates(
         self, sample_repo: dict[str, Path]

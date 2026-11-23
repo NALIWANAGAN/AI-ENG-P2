@@ -111,6 +111,33 @@ class TestTurnTracker:
         assert t2.action == "stop"
         assert t2.system_message is not None and "max_turns" in t2.system_message
 
+    def test_happy_soft_budget_warning_at_85_percent_counts_down_then_stops(self) -> None:
+        tracker = TurnTracker(max_turns=12, max_repeats=3)  # 85% = turn 10
+
+        for i in range(1, 10):
+            dec = tracker.record_turn(
+                [ToolCallRecord(tool_name="read_file_slice", arguments={"path": f"file_{i}.py"})]
+            )
+            assert dec.action == "continue"
+
+        t10 = tracker.record_turn(
+            [ToolCallRecord(tool_name="read_file_slice", arguments={"path": "file_10.py"})]
+        )
+        assert t10.action == "warn"
+        assert t10.system_message is not None and "2 turns left" in t10.system_message
+
+        t11 = tracker.record_turn(
+            [ToolCallRecord(tool_name="read_file_slice", arguments={"path": "file_11.py"})]
+        )
+        assert t11.action == "warn"
+        assert t11.system_message is not None and "1 turns left" in t11.system_message
+
+        t12 = tracker.record_turn(
+            [ToolCallRecord(tool_name="read_file_slice", arguments={"path": "file_12.py"})]
+        )
+        assert t12.action == "stop"
+        assert t12.system_message is not None and "max_turns" in t12.system_message
+
     def test_edge_separate_tracker_instances_do_not_share_state(self) -> None:
         call = [ToolCallRecord(tool_name="list_folder_content", arguments={"path": "."})]
         run1 = TurnTracker()

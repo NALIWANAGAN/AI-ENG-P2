@@ -104,6 +104,24 @@ class TurnTracker:
                 repeated_turns=repeated_turns,
                 system_message=msg,
             )
+            
+                
+        # warning if 85% of the turn is being reached
+        budget_turn = int(0.85 * self._max_turns)
+        if self._max_turns >= 4 and turn_num >= budget_turn:
+            turns_left = self._max_turns - turn_num
+            logger.warning("[SOFT MAX TURN] REACHED 85%% of MAX TURNS: %d", budget_turn)
+            msg = (
+                f"Budget almost exhausted ({turns_left} turns left). Stop opening new files, "
+                "write your remaining findings with create_audit_report, and list unchecked areas under Limitations."
+            )
+            return TurnDecision(
+                turn_number=turn_num,
+                action="warn",
+                is_repetitive=is_repetitive,
+                repeated_turns=repeated_turns,
+                system_message=msg,
+            )
 
         # Actionable warning on consecutive tool errors (even with different arguments)
         if self._consecutive_errors >= 2:

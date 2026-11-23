@@ -29,7 +29,14 @@ class Settings(BaseSettings):
     DEFAULT_SEARCH_MATCHES_PER_BATCH: int = 50
     DEFAULT_MAX_MATCHES_PER_FILE: int = 20
     MAX_READ_TOKENS: int = 4000
+    MAX_AUDIT_REPORT_BYTES: int = 200_000
     TOKENIZER_ENCODING: str = "o200k_base"
+
+    # LLM Rate-Limit & Retry Policy (RPM / TPM pacing)
+    LLM_MAX_RETRIES: int = 5
+    LLM_TURN_DELAY_SECONDS: float = 4.0
+    LLM_RETRY_BASE_DELAY_SECONDS: float = 10.0
+    LLM_RETRY_MAX_DELAY_SECONDS: float = 65.0
 
 
 settings = Settings()

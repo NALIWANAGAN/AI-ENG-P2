@@ -3,7 +3,7 @@ def role_prompt() -> str:
 provided tools and document how it uses a database. You cannot modify files or run code.
 """
 
-
+# USER PROMPT
 def main_goal_prompt(date: str) -> str:
     return f"""Goal: produce a database schema report for the repository at the given path.
 Cover what the code actually shows:
@@ -50,26 +50,28 @@ def constraint_prompt() -> str:
 def workflow_prompt() -> str:
     return """Workflow:
 1. Orient: call list_folder_content on the root. Separate schema sources (schema.sql,
-   migrations/, ORM models) from application code (repositories, services, routes). Judge
-   the size: small, medium or large.
+   migrations/, ORM models) from application code (repositories, services, routes).
 2. Locate: call search_symbol many times in the SAME turn when the searches are independent
    (for example CREATE TABLE, ALTER TABLE, table names, model base classes, execute(, text(,
    session.query, WITH RECURSIVE).
 3. Read: using the hits, call read_file_slice many times in the SAME turn on the relevant
    line ranges. Prefer definitions and queries over whole files.
-4. Notes: end every turn with a NOTES block, with three lines:
+4. Write incrementally (read -> write -> read -> write): NEVER wait until the end to start
+   the report. As soon as you finish reading one area (e.g., migrations/schema files),
+   immediately call create_audit_report to save those sections (such as Overview and Table
+   schema) using the same filename across turns. Then inspect the next area (e.g.,
+   repositories/services) and call create_audit_report again to add Query inventory, ERD,
+   Findings, and Limitations.
+5. Notes: end every turn with a brief NOTES block:
    - Confirmed: facts with path:line
    - To check: what is still open
    - Written: report sections already saved
-5. Write: save each section with create_audit_report as soon as one area (a module, a
-   migrations folder) is fully understood. Do not carry unwritten findings across many turns.
-   Mark the last call as final only when all areas are covered.
 
-Scale to the codebase, not to a turn count. Small: gather, then write. Medium or large: work
-area by area, write each section as you finish it, then move on. Stop when every area is
-covered or when remaining areas are listed under Limitations.
+Work area by area and write each section as soon as it is confirmed, regardless of codebase
+size. Never carry unwritten findings across many turns. Set is_final=true on your last
+create_audit_report call once all areas are covered or remaining areas are listed under
+Limitations.
 """
 
-
-def build_system_prompt(date: str) -> str:
-    return "\n".join([role_prompt(), main_goal_prompt(date), constraint_prompt(), workflow_prompt()])
+def build_system_prompt() -> str:
+    return "\n".join([role_prompt(), workflow_prompt(), constraint_prompt()])

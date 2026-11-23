@@ -63,6 +63,7 @@ class TestRedactText:
         "raw,expected",
         [
             ("host = '192.168.1.42'", "host = '[REDACTED_IP]'"),
+            ("Connected to 192.168.1.9.", "Connected to [REDACTED_IP]."),
             ("bind 10.0.0.1:8080", "bind [REDACTED_IP]:8080"),
             ("ip = '2001:0db8:85a3:0000:0000:8a2e:0370:7334'", "ip = '[REDACTED_IP]'"),
             ("ip = '2001:db8::1'", "ip = '[REDACTED_IP]'"),

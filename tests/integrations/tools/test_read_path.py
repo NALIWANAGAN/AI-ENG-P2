@@ -3,11 +3,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
-import tools.read_path as read_path_tools
-from services.read_path import ReadPath
+from tools.read_path import create_read_path_mcp
 
 
 @pytest.fixture
@@ -108,11 +107,9 @@ def sample_mcp_repo(tmp_path: Path) -> dict[str, Path]:
 
 
 @pytest.fixture
-def mcp_reader(sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> ReadPath:
-    """Confine the MCP server's ReadPath instance to the temporary integration repo."""
-    confined_reader = ReadPath(root_dir=sample_mcp_repo["project"])
-    monkeypatch.setattr(read_path_tools, "reader", confined_reader)
-    return confined_reader
+def read_path_mcp(sample_mcp_repo: dict[str, Path]) -> FastMCP:
+    """Create a FastMCP read-path server confined to the temporary integration repo."""
+    return create_read_path_mcp(root_dir=sample_mcp_repo["project"])
 
 
 def _extract_payload(call_result: Any) -> dict[str, Any]:
@@ -129,9 +126,9 @@ def _extract_payload(call_result: Any) -> dict[str, Any]:
 @pytest.mark.anyio
 class TestMCPToolDiscovery:
     async def test_happy_registers_expected_tools_without_leaking_ctx_or_metadata(
-        self, mcp_reader: ReadPath
+        self, read_path_mcp: FastMCP
     ) -> None:
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             tools = await client.list_tools()
 
         tool_map = {t.name: t for t in tools}
@@ -170,14 +167,14 @@ class TestMCPToolDiscovery:
 @pytest.mark.anyio
 class TestListFolderContentMCPIntegration:
     async def test_happy_lists_unignored_files_strips_metadata_and_logs_audit(
-        self, mcp_reader: ReadPath
+        self, read_path_mcp: FastMCP
     ) -> None:
         logs: list[Any] = []
 
         async def log_handler(message: Any) -> None:
             logs.append(message)
 
-        async with Client(read_path_tools.mcp, log_handler=log_handler) as client:
+        async with Client(read_path_mcp, log_handler=log_handler) as client:
             result = await client.call_tool("list_folder_content", {"request": {"path": "."}})
 
         payload = _extract_payload(result)
@@ -207,14 +204,10 @@ class TestListFolderContentMCPIntegration:
         assert any("Listed directory:" in str(entry.data) for entry in logs)
 
     async def test_happy_pagination_across_batches(
-        self, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+        self, sample_mcp_repo: dict[str, Path]
     ) -> None:
-        monkeypatch.setattr(
-            read_path_tools,
-            "reader",
-            ReadPath(root_dir=sample_mcp_repo["project"], items_per_batch=3),
-        )
-        async with Client(read_path_tools.mcp) as client:
+        paged_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], items_per_batch=3)
+        async with Client(paged_mcp) as client:
             p1 = _extract_payload(
                 await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 1}})
             )
@@ -229,9 +222,9 @@ class TestListFolderContentMCPIntegration:
         assert set(p1["content"].splitlines()).isdisjoint(p2["content"].splitlines())
 
     async def test_edge_empty_dir_out_of_range_batch_and_token_cap(
-        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+        self, read_path_mcp: FastMCP, sample_mcp_repo: dict[str, Path]
     ) -> None:
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             empty = _extract_payload(
                 await client.call_tool("list_folder_content", {"request": {"path": "empty_dir"}})
             )
@@ -239,12 +232,8 @@ class TestListFolderContentMCPIntegration:
                 await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 99}})
             )
 
-        monkeypatch.setattr(
-            read_path_tools,
-            "reader",
-            ReadPath(root_dir=sample_mcp_repo["project"], max_tokens=10),
-        )
-        async with Client(read_path_tools.mcp) as client:
+        capped_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], max_tokens=10)
+        async with Client(capped_mcp) as client:
             capped = _extract_payload(
                 await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 1}})
             )
@@ -272,9 +261,9 @@ class TestListFolderContentMCPIntegration:
         ],
     )
     async def test_sad_errors_surface_as_mcp_tool_error(
-        self, mcp_reader: ReadPath, request_payload: dict[str, Any]
+        self, read_path_mcp: FastMCP, request_payload: dict[str, Any]
     ) -> None:
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
                 await client.call_tool("list_folder_content", {"request": request_payload})
 
@@ -287,14 +276,14 @@ class TestListFolderContentMCPIntegration:
 @pytest.mark.anyio
 class TestReadFileSliceMCPIntegration:
     async def test_happy_slice_and_next_line_continuation_with_audit_log(
-        self, mcp_reader: ReadPath
+        self, read_path_mcp: FastMCP
     ) -> None:
         logs: list[Any] = []
 
         async def log_handler(message: Any) -> None:
             logs.append(message)
 
-        async with Client(read_path_tools.mcp, log_handler=log_handler) as client:
+        async with Client(read_path_mcp, log_handler=log_handler) as client:
             s1 = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
@@ -320,9 +309,9 @@ class TestReadFileSliceMCPIntegration:
         assert any("Read slice:" in str(entry.data) for entry in logs)
 
     async def test_edge_empty_eof_token_cap_minified_and_invalid_utf8(
-        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+        self, read_path_mcp: FastMCP, sample_mcp_repo: dict[str, Path]
     ) -> None:
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             empty = _extract_payload(
                 await client.call_tool("read_file_slice", {"request": {"path": "empty.txt"}})
             )
@@ -336,12 +325,8 @@ class TestReadFileSliceMCPIntegration:
                 await client.call_tool("read_file_slice", {"request": {"path": "bad_utf8.txt"}})
             )
 
-        monkeypatch.setattr(
-            read_path_tools,
-            "reader",
-            ReadPath(root_dir=sample_mcp_repo["project"], max_tokens=40),
-        )
-        async with Client(read_path_tools.mcp) as client:
+        capped_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], max_tokens=40)
+        async with Client(capped_mcp) as client:
             capped = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
@@ -371,17 +356,17 @@ class TestReadFileSliceMCPIntegration:
         ],
     )
     async def test_sad_errors_surface_as_mcp_tool_error(
-        self, mcp_reader: ReadPath, request_payload: dict[str, Any]
+        self, read_path_mcp: FastMCP, request_payload: dict[str, Any]
     ) -> None:
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
                 await client.call_tool("read_file_slice", {"request": request_payload})
 
     async def test_sad_absolute_outside_path_blocked(
-        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path]
+        self, read_path_mcp: FastMCP, sample_mcp_repo: dict[str, Path]
     ) -> None:
         outside_file = str(sample_mcp_repo["sibling_secret"] / "outside.txt")
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
                 await client.call_tool("read_file_slice", {"request": {"path": outside_file}})
 
@@ -394,14 +379,14 @@ class TestReadFileSliceMCPIntegration:
 @pytest.mark.anyio
 class TestSearchSymbolMCPIntegration:
     async def test_happy_all_and_definitions_modes_strip_metadata_and_log_audit(
-        self, mcp_reader: ReadPath
+        self, read_path_mcp: FastMCP
     ) -> None:
         logs: list[Any] = []
 
         async def log_handler(message: Any) -> None:
             logs.append(message)
 
-        async with Client(read_path_tools.mcp, log_handler=log_handler) as client:
+        async with Client(read_path_mcp, log_handler=log_handler) as client:
             all_res = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
@@ -433,7 +418,7 @@ class TestSearchSymbolMCPIntegration:
         assert any("Searched 'total_cents'" in str(entry.data) for entry in logs)
 
     async def test_edge_pagination_per_file_cap_token_cap_and_no_matches(
-        self, mcp_reader: ReadPath, sample_mcp_repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+        self, sample_mcp_repo: dict[str, Path]
     ) -> None:
         noisy = sample_mcp_repo["project"] / "noisy.py"
         noisy.write_text(
@@ -441,16 +426,12 @@ class TestSearchSymbolMCPIntegration:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(
-            read_path_tools,
-            "reader",
-            ReadPath(
-                root_dir=sample_mcp_repo["project"],
-                max_matches_per_file=5,
-                matches_per_batch=2,
-            ),
+        paged_mcp = create_read_path_mcp(
+            root_dir=sample_mcp_repo["project"],
+            max_matches_per_file=5,
+            matches_per_batch=2,
         )
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(paged_mcp) as client:
             p1 = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
@@ -470,12 +451,8 @@ class TestSearchSymbolMCPIntegration:
                 )
             )
 
-        monkeypatch.setattr(
-            read_path_tools,
-            "reader",
-            ReadPath(root_dir=sample_mcp_repo["project"], max_tokens=20),
-        )
-        async with Client(read_path_tools.mcp) as client:
+        capped_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], max_tokens=20)
+        async with Client(capped_mcp) as client:
             tok_capped = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
@@ -503,9 +480,9 @@ class TestSearchSymbolMCPIntegration:
         ],
     )
     async def test_sad_errors_surface_as_mcp_tool_error(
-        self, mcp_reader: ReadPath, request_payload: dict[str, Any]
+        self, read_path_mcp: FastMCP, request_payload: dict[str, Any]
     ) -> None:
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
                 await client.call_tool("search_symbol", {"request": request_payload})
 
@@ -518,24 +495,21 @@ class TestSearchSymbolMCPIntegration:
 @pytest.mark.anyio
 class TestEndToEndAuditorWorkflow:
     async def test_happy_three_tool_funnel_from_tree_to_schema_to_code_slice(
-        self, mcp_reader: ReadPath
+        self, read_path_mcp: FastMCP
     ) -> None:
         """Simulate an autonomous auditor: list -> read schema -> search symbol -> read code slice."""
-        async with Client(read_path_tools.mcp) as client:
-            # 1. Discover repo files
+        async with Client(read_path_mcp) as client:
             tree = _extract_payload(
                 await client.call_tool("list_folder_content", {"request": {"path": "src"}})
             )
             files = tree["content"].splitlines()
             assert "src/schema.sql" in files
 
-            # 2. Read the database schema
             schema = _extract_payload(
                 await client.call_tool("read_file_slice", {"request": {"path": "src/schema.sql"}})
             )
             assert "total_cents INTEGER NOT NULL" in schema["content"]
 
-            # 3. Locate every Python usage of `total_cents`
             hits = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
@@ -551,7 +525,6 @@ class TestEndToEndAuditorWorkflow:
             assert hits["results"][0]["path"] == "src/repo.py"
             hit_line = hits["results"][0]["lines"][0]
 
-            # 4. Inspect surrounding lines with `read_file_slice`
             code_slice = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
@@ -567,10 +540,10 @@ class TestEndToEndAuditorWorkflow:
             assert "SELECT id, total_cents FROM orders" in code_slice["content"]
 
     async def test_happy_parallel_tool_calls_execute_concurrently(
-        self, mcp_reader: ReadPath
+        self, read_path_mcp: FastMCP
     ) -> None:
         """Verify all 3 async tools can be invoked concurrently via asyncio.gather."""
-        async with Client(read_path_tools.mcp) as client:
+        async with Client(read_path_mcp) as client:
             res_list, res_slice, res_search = await asyncio.gather(
                 client.call_tool("list_folder_content", {"request": {"path": "src"}}),
                 client.call_tool(

@@ -58,7 +58,7 @@ _REDACTION_RULES: list[tuple[re.Pattern[str], str]] = [
     ),
     # IP addresses (IPv4 and IPv6)
     (
-        re.compile(rf"(?<![\d.]){_IPV4_OCTET}(?:\.{_IPV4_OCTET}){{3}}(?![\d.])"),
+        re.compile(rf"(?<!\d\.)(?<!\d){_IPV4_OCTET}(?:\.{_IPV4_OCTET}){{3}}(?!\.\d)(?!\d)"),
         "[REDACTED_IP]",
     ),
     (

@@ -144,6 +144,8 @@ Even after hardening the single-agent ReAct loop with pre-flight mapping, parall
    Asking one model inside one conversation thread to act simultaneously as *repository explorer*, *schema/query cross-checker*, *security/index critic*, and *technical writer + diagrammer* creates natural tension—as seen with `nemotron-3.5-lightning`, which excelled at fast technical exploration yet struggled to shift gears into concise findings and diagrams.
 3. **Provider variance & rate-limit sensitivity:**
    Free-tier and open-weights hosted endpoints vary significantly in RPM limits, tool-call serialization reliability, and adherence to multi-step instructions.
+4. **No Planner-Worker:**
+   For this kind of task, the best approach for the harness is to enforce the planner-worker to cut-off the initial bloated prompt.
 
 ### Conclusion for Future Study
 A single-agent harness should **not** be abandoned prematurely—fixing deterministic guardrails, phase control, and parallel execution unlocks far more capability than vanilla ReAct alone. However, once repository scale or role specialization becomes the bottleneck, the natural next step is **multi-agent orchestration**: splitting the workflow across isolated contexts (for example, a **Schema Extractor**, a **Query & Risk Auditor**, and a **Report Synthesizer / Verifier**) where faster exploratory models scan in parallel and a stronger synthesis model produces the final findings and diagrams.

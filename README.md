@@ -2,6 +2,8 @@
 
 > **Study Focus:** Exploring the real-world behavior of a single-agent **ReAct harness**, how **deterministic guardrails** turn an unreliable reasoning loop into a dependable system, and where a single-model setup begins to hit its architectural ceiling.
 
+<img width="1672" height="941" alt="Read-Only Codebase   Schema Auditor" src="https://github.com/user-attachments/assets/1a9132d6-0b51-48ea-930c-629ca49e7790" />
+
 ---
 
 ## 1. Study Objectives

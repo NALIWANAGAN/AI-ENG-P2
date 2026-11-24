@@ -7,7 +7,7 @@ from openai import BadRequestError, RateLimitError
 import pytest
 
 import agent.harness as harness_module
-from agent.harness import AuditRunResult, run_pipeline
+from agent.harness import AuditRunResult, TokenIOAudit, format_token_io_audit, run_pipeline
 
 
 def _make_rate_limit_error(message: str, retry_after: str | None = None) -> RateLimitError:
@@ -760,3 +760,83 @@ class TestAuditHarnessIntegration:
         t2_c1 = next(m for m in captured_messages[1] if m.get("tool_call_id") == "c1")
         assert '"total_matches": 1' in t2_c1["content"]
         assert "queries.py" in t2_c1["content"]
+
+    async def test_happy_token_io_audit_tracks_categories_provider_usage_and_file_coverage(
+        self, harness_dirs: dict[str, Path]
+    ) -> None:
+        # Add guardrail-ignored files (.gitignore excludes .env and venv/)
+        (harness_dirs["repo"] / ".gitignore").write_text(".env\nvenv/\n", encoding="utf-8")
+        (harness_dirs["repo"] / ".env").write_text("SECRET=123\n", encoding="utf-8")
+        (harness_dirs["repo"] / "venv").mkdir()
+        (harness_dirs["repo"] / "venv" / "pkg.py").write_text("x = 1\n", encoding="utf-8")
+
+        r1 = _make_llm_response(
+            tool_calls=[
+                ("c1", "read_file_slice", {"path": "schema.sql", "line_start": 1, "line_end": 10}),
+                ("c2", "read_file_slice", {"path": "./schema.sql", "line_start": 1, "line_end": 5}),
+            ]
+        )
+        r1.usage = MagicMock(prompt_tokens=500, completion_tokens=40, total_tokens=540)
+
+        r2 = _make_llm_response(
+            tool_calls=[
+                (
+                    "c3",
+                    "create_audit_report",
+                    {
+                        "title": "Coverage Audit",
+                        "filename": "coverage_audit.md",
+                        "section": "Overview",
+                        "content": "Verified `orders` (`schema.sql:1`).",
+                        "is_final": True,
+                    },
+                )
+            ]
+        )
+        r2.usage = MagicMock(prompt_tokens=700, completion_tokens=60, total_tokens=760)
+
+        scripted = [r1, r2]
+
+        async def fake_create(**kwargs):
+            return scripted.pop(0)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        result = await run_pipeline(
+            repo_path=harness_dirs["repo"],
+            audit_path=harness_dirs["reports"],
+            client=mock_client,
+            model_name="test-model",
+            turn_delay_seconds=0,
+        )
+
+        audit = result.token_audit
+        assert isinstance(audit, TokenIOAudit)
+        assert audit.prompt_tokens > 0
+        assert audit.tool_call_tokens > 0
+        assert audit.repo_read_tokens > 0
+        assert audit.model_output_tokens > 0
+        assert audit.total_tokens == (
+            audit.prompt_tokens
+            + audit.tool_call_tokens
+            + audit.repo_read_tokens
+            + audit.model_output_tokens
+        )
+        assert audit.provider_prompt_tokens == 1200
+        assert audit.provider_completion_tokens == 100
+        assert audit.provider_total_tokens == 1300
+
+        # Unignored files in repo: .gitignore, config.py, schema.sql (3 total; .env & venv/ excluded)
+        assert audit.repo_file_count == 3
+        assert audit.files_read_count == 1
+        assert audit.files_read == ["schema.sql"]
+
+        formatted = format_token_io_audit(result)
+        assert "TOKEN I/O & COVERAGE AUDIT" in formatted
+        assert "Prompt tokens" in formatted
+        assert "Tool call tokens" in formatted
+        assert "Repo read tokens" in formatted
+        assert "Model output" in formatted
+        assert "Files read        : 1 / 3" in formatted
+        assert "  - schema.sql" in formatted

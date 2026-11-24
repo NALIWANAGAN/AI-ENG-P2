@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from fastmcp import FastMCP
-from agent.harness import run_pipeline
+from agent.harness import format_token_io_audit, run_pipeline
 from clients.openai_client import client as openai_client
 from core.settings import settings
 from tools.audit_report import create_audit_report_mcp
@@ -26,7 +26,7 @@ mcp = create_mcp_server()
 
 
 if __name__ == "__main__":
-    asyncio.run(
+    result = asyncio.run(
         run_pipeline(
             repo_path="C:/Users/imper/Documents/AI-ENG/P1",
             audit_path="C:/Users/imper/Documents/AI-ENG/nested",
@@ -35,3 +35,4 @@ if __name__ == "__main__":
             max_turns=None,
         )
     )
+    print(format_token_io_audit(result))

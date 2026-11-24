@@ -22,7 +22,8 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionToolParam,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+import tiktoken
 
 from agent.prompts import build_system_prompt, main_goal_prompt
 from clients.openai_client import client as default_client
@@ -130,6 +131,40 @@ async def _call_llm_with_retry(
             await asyncio.sleep(sleep_seconds)
 
 
+_TOKEN_ENCODER: Any | None = None
+
+
+def _count_text_tokens(text: str) -> int:
+    """Count tokens using tiktoken with an offline ceiling fallback."""
+    global _TOKEN_ENCODER
+    if not text:
+        return 0
+    if _TOKEN_ENCODER is None:
+        try:
+            _TOKEN_ENCODER = tiktoken.get_encoding(settings.TOKENIZER_ENCODING)
+        except Exception:
+            _TOKEN_ENCODER = False
+    if _TOKEN_ENCODER:
+        return len(_TOKEN_ENCODER.encode(text, disallowed_special=()))
+    return (len(text) + 3) // 4
+
+
+class TokenIOAudit(BaseModel):
+    """End-of-run token I/O breakdown and repository file coverage summary."""
+
+    prompt_tokens: int = 0
+    tool_call_tokens: int = 0
+    repo_read_tokens: int = 0
+    model_output_tokens: int = 0
+    total_tokens: int = 0
+    provider_prompt_tokens: int | None = None
+    provider_completion_tokens: int | None = None
+    provider_total_tokens: int | None = None
+    repo_file_count: int = 0
+    files_read_count: int = 0
+    files_read: list[str] = Field(default_factory=list)
+
+
 class AuditRunResult(BaseModel):
     """Final outcome returned by the audit harness pipeline."""
 
@@ -138,6 +173,37 @@ class AuditRunResult(BaseModel):
     report_file: str | None = None
     final_message: str = ""
     stop_reason: str | None = None
+    token_audit: TokenIOAudit = Field(default_factory=TokenIOAudit)
+
+
+def format_token_io_audit(result: AuditRunResult) -> str:
+    """Format a readable terminal/log summary of token I/O consumption and file coverage."""
+    audit = result.token_audit
+    lines = [
+        "================ TOKEN I/O & COVERAGE AUDIT ================",
+        f"Status            : {result.status} ({result.turns_used} turns)",
+        f"Report file       : {result.report_file or 'none'}",
+        f"Prompt tokens     : {audit.prompt_tokens:,}",
+        f"Tool call tokens  : {audit.tool_call_tokens:,}",
+        f"Repo read tokens  : {audit.repo_read_tokens:,}",
+        f"Model output      : {audit.model_output_tokens:,}",
+        "------------------------------------------------------------",
+        f"Total I/O tokens  : {audit.total_tokens:,}",
+    ]
+    if audit.provider_total_tokens is not None:
+        lines.append(
+            f"Provider usage    : {audit.provider_prompt_tokens or 0:,} in / "
+            f"{audit.provider_completion_tokens or 0:,} out / "
+            f"{audit.provider_total_tokens:,} total"
+        )
+    lines.append(
+        f"Repo files        : {audit.repo_file_count} (excluding guardrail-ignored files)"
+    )
+    lines.append(f"Files read        : {audit.files_read_count} / {audit.repo_file_count}")
+    for rel_path in audit.files_read:
+        lines.append(f"  - {rel_path}")
+    lines.append("============================================================")
+    return "\n".join(lines)
 
 
 def sanitize_schema(node: Any) -> Any:
@@ -632,6 +698,9 @@ async def repo_auditing(
     )
     preflight_block = f"\n\n{preflight_context}" if preflight_context else ""
     resolved_repo_path = Path(repo_path).resolve()
+    repo_file_count = len(
+        list_unignored_stdlib(resolved_repo_path, root_dir=resolved_repo_path)
+    )
 
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
@@ -652,6 +721,49 @@ async def repo_auditing(
     sections_written: list[str] = []
     turns_since_last_write = 0
     tool_call_meta: dict[str, tuple[str, dict[str, Any]]] = {}
+    files_read_set: set[str] = set()
+
+    # Token I/O accumulators across all turns
+    prompt_tok = 0
+    tool_call_tok = 0
+    repo_read_tok = 0
+    model_output_tok = 0
+    provider_in_tok = 0
+    provider_out_tok = 0
+    provider_tot_tok = 0
+    has_provider_usage = False
+
+    def _build_result(
+        *,
+        status: Literal["completed", "stopped"],
+        turns_used: int,
+        final_message: str = "",
+        stop_reason: str | None = None,
+    ) -> AuditRunResult:
+        sorted_files_read = sorted(files_read_set)
+        audit = TokenIOAudit(
+            prompt_tokens=prompt_tok,
+            tool_call_tokens=tool_call_tok,
+            repo_read_tokens=repo_read_tok,
+            model_output_tokens=model_output_tok,
+            total_tokens=prompt_tok + tool_call_tok + repo_read_tok + model_output_tok,
+            provider_prompt_tokens=provider_in_tok if has_provider_usage else None,
+            provider_completion_tokens=provider_out_tok if has_provider_usage else None,
+            provider_total_tokens=provider_tot_tok if has_provider_usage else None,
+            repo_file_count=repo_file_count,
+            files_read_count=len(sorted_files_read),
+            files_read=sorted_files_read,
+        )
+        run_result = AuditRunResult(
+            status=status,
+            turns_used=turns_used,
+            report_file=active_report_file,
+            final_message=final_message,
+            stop_reason=stop_reason,
+            token_audit=audit,
+        )
+        logger.info("\n%s", format_token_io_audit(run_result))
+        return run_result
 
     for turn in range(1, effective_max_turns + 1):
         if turn > 1 and turn_delay_seconds > 0:
@@ -696,6 +808,23 @@ async def repo_auditing(
         else:
             request_messages = messages
 
+        # Account input tokens sent on this turn by category
+        tool_call_tok += _count_text_tokens(json.dumps(active_tools, default=str))
+        for msg in request_messages:
+            role = msg.get("role")
+            if role in {"system", "user"}:
+                prompt_tok += _count_text_tokens(str(msg.get("content") or ""))
+            elif role == "tool":
+                cid = str(msg.get("tool_call_id") or "")
+                t_name, _ = tool_call_meta.get(cid, ("", {}))
+                toks = _count_text_tokens(str(msg.get("content") or ""))
+                if t_name in _COMPACTABLE_TOOLS:
+                    repo_read_tok += toks
+                else:
+                    tool_call_tok += toks
+            else:
+                tool_call_tok += _count_text_tokens(json.dumps(msg, default=str))
+
         logger.info("[TURN %d/%d] Requesting model action.", turn, effective_max_turns)
         response = await _call_llm_with_retry(
             client=client,
@@ -711,12 +840,38 @@ async def repo_auditing(
 
         assistant_msg = response.choices[0].message
 
+        # Account output tokens generated by the model on this turn
+        out_parts = [str(assistant_msg.content or "")]
+        for tc in (assistant_msg.tool_calls or []):
+            out_parts.append(str(tc.function.name or ""))
+            out_parts.append(str(tc.function.arguments or ""))
+        model_output_tok += _count_text_tokens("\n".join(p for p in out_parts if p))
+
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            u_in = getattr(usage, "prompt_tokens", None)
+            u_out = getattr(usage, "completion_tokens", None)
+            u_tot = getattr(usage, "total_tokens", None)
+            if (
+                isinstance(u_in, int)
+                and not isinstance(u_in, bool)
+                and isinstance(u_out, int)
+                and not isinstance(u_out, bool)
+            ):
+                has_provider_usage = True
+                provider_in_tok += u_in
+                provider_out_tok += u_out
+                provider_tot_tok += (
+                    u_tot
+                    if isinstance(u_tot, int) and not isinstance(u_tot, bool)
+                    else (u_in + u_out)
+                )
+
         # Stop condition: model replied with plain text (no tool calls)
         if not assistant_msg.tool_calls:
-            return AuditRunResult(
+            return _build_result(
                 status="completed",
                 turns_used=turn,
-                report_file=active_report_file,
                 final_message=redact_text(assistant_msg.content or ""),
             )
 
@@ -756,14 +911,26 @@ async def repo_auditing(
                 report_finalized = True
             if not record.is_error and record.tool_name != "create_audit_report":
                 gathered_info_this_turn = True
+            if not record.is_error and record.tool_name == "read_file_slice":
+                raw_read_path = record.arguments.get("path")
+                if isinstance(raw_read_path, str) and raw_read_path.strip():
+                    try:
+                        rel_read = (
+                            (resolved_repo_path / raw_read_path)
+                            .resolve()
+                            .relative_to(resolved_repo_path)
+                            .as_posix()
+                        )
+                        files_read_set.add(rel_read)
+                    except ValueError:
+                        files_read_set.add(raw_read_path.strip())
 
         # Stop condition 2: agent explicitly finalized the Markdown audit report
         if report_finalized:
             logger.info("[DONE] Audit report finalized: %s", active_report_file)
-            return AuditRunResult(
+            return _build_result(
                 status="completed",
                 turns_used=turn,
-                report_file=active_report_file,
                 final_message=f"Audit report finalized: {active_report_file}",
             )
 
@@ -791,17 +958,15 @@ async def repo_auditing(
         if decision.action == "warn" and decision.system_message:
             messages.append({"role": "user", "content": decision.system_message})
         elif decision.action == "stop":
-            return AuditRunResult(
+            return _build_result(
                 status="stopped",
                 turns_used=turn,
-                report_file=active_report_file,
                 stop_reason=decision.system_message,
             )
 
-    return AuditRunResult(
+    return _build_result(
         status="stopped",
         turns_used=effective_max_turns,
-        report_file=active_report_file,
         stop_reason=f"Stopped: reached max_turns limit ({effective_max_turns}).",
     )
 

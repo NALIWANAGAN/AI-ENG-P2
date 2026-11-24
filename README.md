@@ -187,3 +187,14 @@ A single-agent harness should **not** be abandoned prematurely—fixing determin
 ```bash
 uv run pytest -v
 ```
+
+---
+
+Portfolio: **[Benjineer](https://benjineer.vercel.app)**
+Email: benjicanones6@gmail.com
+
+---
+
+- Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2022). *ReAct: Synergizing Reasoning and Acting in Language Models*. [arXiv:2210.03629](https://arxiv.org/abs/2210.03629)
+
+---

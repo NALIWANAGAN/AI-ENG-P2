@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     MAX_AUDIT_REPORT_BYTES: int = 200_000
     TOKENIZER_ENCODING: str = "o200k_base"
 
-    # LLM Rate-Limit & Retry Policy (RPM / TPM pacing)
+    # LLM Rate-Limit, Decoding & Retry Policy (RPM / TPM pacing)
+    LLM_TEMPERATURE: float = 0.0
+    LLM_PARALLEL_TOOL_CALLS: bool = True
     LLM_MAX_RETRIES: int = 5
     LLM_TURN_DELAY_SECONDS: float = 4.0
     LLM_RETRY_BASE_DELAY_SECONDS: float = 10.0

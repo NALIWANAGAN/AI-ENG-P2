@@ -12,6 +12,7 @@ from openai import (
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
+    BadRequestError,
     InternalServerError,
     RateLimitError,
 )
@@ -75,16 +76,34 @@ async def _call_llm_with_retry(
     max_retries: int,
     retry_base_delay: float,
     retry_max_delay: float,
+    temperature: float = settings.LLM_TEMPERATURE,
+    parallel_tool_calls: bool = settings.LLM_PARALLEL_TOOL_CALLS,
 ) -> Any:
-    """Call chat completions with exponential backoff + jitter for 429/5xx/network errors."""
-    for attempt in range(max_retries + 1):
+    """Call chat completions with decoding controls and exponential backoff + jitter for 429/5xx/network errors."""
+    include_parallel = bool(tools) and parallel_tool_calls is not None
+    attempt = 0
+
+    while True:
+        request_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": temperature,
+        }
+        if include_parallel:
+            request_kwargs["parallel_tool_calls"] = parallel_tool_calls
+
         try:
-            return await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-            )
+            return await client.chat.completions.create(**request_kwargs)
+        except BadRequestError as exc:
+            if include_parallel and "parallel_tool_calls" in str(exc).lower():
+                logger.warning(
+                    "[LLM] Provider rejected parallel_tool_calls; retrying without it."
+                )
+                include_parallel = False
+                continue
+            raise
         except _RETRYABLE_ERRORS as exc:
             if attempt >= max_retries:
                 logger.error(
@@ -106,6 +125,7 @@ async def _call_llm_with_retry(
                 max_retries + 1,
                 sleep_seconds,
             )
+            attempt += 1
             await asyncio.sleep(sleep_seconds)
 
 
@@ -230,6 +250,102 @@ async def _execute_tool_call(
     return tool_message, record, report_file, report_finalized
 
 
+_SCHEMA_EXTENSIONS = {".sql", ".prisma", ".graphql", ".dbml"}
+_SCHEMA_KEYWORDS = {
+    "migration",
+    "migrations",
+    "alembic",
+    "schema",
+    "model",
+    "models",
+    "entity",
+    "entities",
+    "ddl",
+    "database",
+    "seed",
+}
+_DB_ACCESS_KEYWORDS = {
+    "repo",
+    "repos",
+    "repository",
+    "repositories",
+    "dao",
+    "query",
+    "queries",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "mongo",
+    "client",
+    "service",
+    "services",
+}
+
+
+def _classify_preflight_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Split repo-relative paths into candidate schema/model files and DB-access files."""
+    schema_files: list[str] = []
+    db_access_files: list[str] = []
+
+    for raw_path in paths:
+        rel = raw_path.strip()
+        if not rel:
+            continue
+        p = Path(rel)
+        suffix = p.suffix.lower()
+        part_tokens = [part.lower() for part in p.parts]
+        stem_tokens = re.split(r"[^a-z0-9]+", p.stem.lower())
+        all_tokens = set(part_tokens + stem_tokens)
+
+        if suffix in _SCHEMA_EXTENSIONS or (all_tokens & _SCHEMA_KEYWORDS):
+            schema_files.append(rel)
+        elif all_tokens & _DB_ACCESS_KEYWORDS:
+            db_access_files.append(rel)
+
+    return schema_files, db_access_files
+
+
+async def _build_preflight_context(mcp_client: Client) -> str:
+    """Deterministically list root files and highlight candidate schema/DB files before Turn 1."""
+    try:
+        res = await mcp_client.call_tool(
+            "list_folder_content", {"request": {"path": ".", "batch": 1}}
+        )
+        payload = res.structured_content
+        if not isinstance(payload, dict):
+            return ""
+    except Exception as exc:
+        logger.warning("[PREFLIGHT] Skipped root listing: %s", exc)
+        return ""
+
+    raw_content = str(payload.get("content") or "")
+    files = [line.strip() for line in raw_content.splitlines() if line.strip()]
+    schema_files, db_access_files = _classify_preflight_paths(files)
+
+    total_files = payload.get("total_lines", len(files))
+    line_read = payload.get("line_read", f"1-{len(files)}")
+    has_more = bool(payload.get("has_more", False))
+    next_batch = payload.get("next_batch")
+
+    lines = [
+        "Pre-flight repository map (already computed deterministically — do NOT call list_folder_content('.') again unless has_more is true):",
+        f"Total files: {total_files} | Showing: {line_read} | has_more: {has_more}"
+        + (f" (next_batch: {next_batch})" if has_more and next_batch else ""),
+    ]
+
+    if schema_files:
+        lines.append("\nCandidate schema / migration / model files (inspect these first in parallel):")
+        lines.extend(f"- {path}" for path in schema_files[:25])
+    if db_access_files:
+        lines.append("\nCandidate database access / query files:")
+        lines.extend(f"- {path}" for path in db_access_files[:25])
+
+    lines.append("\nAll listed files (batch 1):")
+    lines.append(raw_content if raw_content else "(empty repository)")
+
+    return redact_text("\n".join(lines))
+
+
 async def repo_auditing(
     mcp_client: Client,
     repo_path: Path | str,
@@ -243,8 +359,10 @@ async def repo_auditing(
     turn_delay_seconds: float = settings.LLM_TURN_DELAY_SECONDS,
     retry_base_delay: float = settings.LLM_RETRY_BASE_DELAY_SECONDS,
     retry_max_delay: float = settings.LLM_RETRY_MAX_DELAY_SECONDS,
+    temperature: float = settings.LLM_TEMPERATURE,
+    parallel_tool_calls: bool = settings.LLM_PARALLEL_TOOL_CALLS,
 ) -> AuditRunResult:
-    """Run the multi-turn async audit loop with parallel tool execution, redaction, and TurnTracker."""
+    """Run the multi-turn async audit loop with pre-flight mapping, parallel tool execution, redaction, and TurnTracker."""
     if max_retries < 0:
         raise ValueError("max_retries must be >= 0")
     if turn_delay_seconds < 0 or retry_base_delay < 0 or retry_max_delay < 0:
@@ -257,6 +375,9 @@ async def repo_auditing(
         tool for tool in tools if tool["function"]["name"] == "create_audit_report"
     ]
 
+    preflight_context = await _build_preflight_context(mcp_client)
+    preflight_block = f"\n\n{preflight_context}" if preflight_context else ""
+
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
         {
@@ -267,6 +388,7 @@ async def repo_auditing(
                 f"Turn budget: {effective_max_turns} turns. Write sections incrementally with "
                 "create_audit_report as you confirm each area; after turn "
                 f"{budget_turn}, read tools will be disabled so you can finalize the report."
+                f"{preflight_block}"
             ),
         },
     ]
@@ -300,6 +422,8 @@ async def repo_auditing(
             max_retries=max_retries,
             retry_base_delay=retry_base_delay,
             retry_max_delay=retry_max_delay,
+            temperature=temperature,
+            parallel_tool_calls=parallel_tool_calls,
         )
 
         assistant_msg = response.choices[0].message
@@ -372,6 +496,8 @@ async def run_pipeline(
     turn_delay_seconds: float = settings.LLM_TURN_DELAY_SECONDS,
     retry_base_delay: float = settings.LLM_RETRY_BASE_DELAY_SECONDS,
     retry_max_delay: float = settings.LLM_RETRY_MAX_DELAY_SECONDS,
+    temperature: float = settings.LLM_TEMPERATURE,
+    parallel_tool_calls: bool = settings.LLM_PARALLEL_TOOL_CALLS,
 ) -> AuditRunResult:
     """Bind deterministic repo & report sandboxes, open the MCP session, and run the audit."""
     logger.info("[PIPELINE] Starting audit pipeline.")
@@ -406,4 +532,6 @@ async def run_pipeline(
             turn_delay_seconds=turn_delay_seconds,
             retry_base_delay=retry_base_delay,
             retry_max_delay=retry_max_delay,
+            temperature=temperature,
+            parallel_tool_calls=parallel_tool_calls,
         )

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from openai import RateLimitError
+from openai import BadRequestError, RateLimitError
 import pytest
 
 import agent.harness as harness_module
@@ -342,3 +342,59 @@ class TestAuditHarnessIntegration:
         assert all(len(names) == 4 for names in captured_tool_names[:3])
         assert captured_tool_names[3] == ["create_audit_report"]
         assert (harness_dirs["reports"] / "budget_audit.md").exists()
+
+    async def test_happy_preflight_map_and_decoding_controls_with_parallel_fallback(
+        self, harness_dirs: dict[str, Path]
+    ) -> None:
+        (harness_dirs["repo"] / "src").mkdir()
+        (harness_dirs["repo"] / "src" / "query_repo.py").write_text(
+            "def list_orders(): return 'SELECT * FROM orders'\n",
+            encoding="utf-8",
+        )
+
+        captured_kwargs: list[dict] = []
+
+        bad_req_response = MagicMock()
+        bad_req_response.status_code = 400
+        bad_req_response.headers = {}
+        bad_req_response.request = MagicMock()
+        unsupported_parallel_err = BadRequestError(
+            message="Unsupported parameter: parallel_tool_calls",
+            response=bad_req_response,
+            body=None,
+        )
+
+        async def fake_create(**kwargs):
+            captured_kwargs.append(dict(kwargs))
+            if len(captured_kwargs) == 1:
+                raise unsupported_parallel_err
+            return _make_llm_response(content="Completed with preflight context.")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        result = await run_pipeline(
+            repo_path=harness_dirs["repo"],
+            audit_path=harness_dirs["reports"],
+            client=mock_client,
+            model_name="test-model",
+            turn_delay_seconds=0,
+        )
+
+        assert result.status == "completed"
+        assert len(captured_kwargs) == 2
+
+        # First call passes decoding controls (temperature=0.0, parallel_tool_calls=True)
+        assert captured_kwargs[0]["temperature"] == 0.0
+        assert captured_kwargs[0]["parallel_tool_calls"] is True
+        # Fallback retry omits parallel_tool_calls when provider rejects it
+        assert "parallel_tool_calls" not in captured_kwargs[1]
+        assert captured_kwargs[1]["temperature"] == 0.0
+
+        # Pre-flight repo map & candidate schema/DB files were injected BEFORE Turn 1
+        user_msg = captured_kwargs[0]["messages"][1]["content"]
+        assert "Pre-flight repository map" in user_msg
+        assert "Candidate schema / migration / model files" in user_msg
+        assert "- schema.sql" in user_msg
+        assert "Candidate database access / query files" in user_msg
+        assert "- src/query_repo.py" in user_msg

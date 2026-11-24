@@ -1,25 +1,20 @@
 def role_prompt() -> str:
-    return """You are a read-only codebase auditor. You investigate a repository with the
-provided tools and document how it uses a database. You cannot modify files or run code.
+    return """You are a read-only codebase auditor. You investigate a repository with the provided tools and document how it uses a database. You cannot modify files or run code.
 """
 
 # USER PROMPT
 def main_goal_prompt(date: str) -> str:
     return f"""Goal: produce a database schema report for the repository at the given path.
 Cover what the code actually shows:
-- Tables, columns, types, nullability, defaults, primary/foreign keys, unique and CHECK
-  constraints, indexes (from schema files, migrations and ORM models).
+- Tables, columns, types, nullability, defaults, primary/foreign keys, unique and CHECK constraints, indexes (from schema files, migrations and ORM models).
 - Relationships between tables.
-- How the app talks to the database: raw SQL, ORM queries, CTEs, joins, transactions,
-  engine/driver and connection setup (never include credentials).
-- Problems: ORM fields missing from migrations (or the reverse), columns filtered or joined
-  on without an index, SQL built by string formatting.
+- How the app talks to the database: raw SQL, ORM queries, CTEs, joins, transactions, engine/driver and connection setup (never include credentials).
+- Problems: ORM fields missing from migrations (or the reverse), columns filtered or joined on without an index, SQL built by string formatting.
 
 Evidence rules:
 - Every table, column, constraint and finding needs a source as `path:line`.
 - Never invent anything. If you could not verify it, put it under "Limitations".
-- If sources disagree (ORM vs migration), report both and say which you treat as the
-  source of truth, and why.
+- If sources disagree (ORM vs migration), report both and say which you treat as the source of truth, and why.
 - If the repository has no database code, say so and finish.
 
 Report format (Markdown, written with the create_audit_report tool):
@@ -49,27 +44,11 @@ def constraint_prompt() -> str:
 
 def workflow_prompt() -> str:
     return """Workflow:
-1. Orient: call list_folder_content on the root. Separate schema sources (schema.sql,
-   migrations/, ORM models) from application code (repositories, services, routes).
-2. Locate: call search_symbol many times in the SAME turn when the searches are independent
-   (for example CREATE TABLE, ALTER TABLE, table names, model base classes, execute(, text(,
-   session.query, WITH RECURSIVE).
-3. Read: using the hits, call read_file_slice many times in the SAME turn on the relevant
-   line ranges. Prefer definitions and queries over whole files.
-4. Write incrementally (read -> write -> read -> write): NEVER wait until the end to start
-   the report. As soon as you finish reading one area (e.g., migrations/schema files),
-   immediately call create_audit_report to save those sections (such as Overview and Table
-   schema) using the same filename across turns. Then inspect the next area (e.g.,
-   repositories/services) and call create_audit_report again to add Query inventory, ERD,
-   Findings, and Limitations.
-5. Notes: end every turn with a brief NOTES block:
-   - Confirmed: facts with path:line
-   - To check: what is still open
-   - Written: report sections already saved
+1. Orient: use the Pre-flight repository map already provided in the user message. Do NOT call list_folder_content on '.' again unless has_more is true or you need a specific subfolder.
+2. Locate & Read in Parallel: starting on Turn 1, batch independent read_file_slice and search_symbol calls in the SAME turn (aim for 3-6 parallel calls per turn; avoid 1-call turns). Inspect candidate schema/migration/model files first, then search for queries (CREATE TABLE, ALTER TABLE, table names, execute(, text(, session.query, WITH RECURSIVE). Prefer narrow line ranges around definitions and queries over whole files.
+3. Write incrementally (read -> write -> read -> write): NEVER wait until the end to start the report. As soon as you finish reading one area (e.g., migrations/schema files), immediately call create_audit_report to save those sections (such as Overview and Table schema) using the same filename across turns. Then inspect the next area (e.g., repositories/services) and call create_audit_report again to add Query inventory, ERD, Findings, and Limitations.
 
-Work area by area and write each section as soon as it is confirmed, regardless of codebase
-size. Never carry unwritten findings across many turns. Set is_final=true on your last
-create_audit_report call once all areas are covered or remaining areas are listed under
+Work area by area and write each section as soon as it is confirmed, regardless of codebase size. Never carry unwritten findings across many turns. Set is_final=true on your last create_audit_report call once all areas are covered or remaining areas are listed under
 Limitations.
 """
 

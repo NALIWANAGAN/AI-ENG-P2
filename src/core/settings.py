@@ -20,9 +20,6 @@ class Settings(BaseSettings):
     OLLAMA_API_KEY: SecretStr | None = None
     OLLAMA_MODEL_NAME: str = "gpt-oss:20b"
 
-    # SQLGlot
-    SQLGLOT_DB_DIALECT: str = "postgres"
-
     # File & Directory Read Guardrails
     DEFAULT_LINES_PER_BATCH: int = 200
     DEFAULT_ITEMS_PER_BATCH: int = 100

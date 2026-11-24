@@ -1,7 +1,9 @@
 import asyncio
 from pathlib import Path
+from typing import Annotated
 
 from fastmcp import Context, FastMCP
+from pydantic import Field
 
 from core.settings import settings
 from schema.audit_report import AuditReportPublicResult, CreateAuditReportRequest
@@ -34,9 +36,49 @@ def create_audit_report_mcp(
         output_schema=AuditReportPublicResult.model_json_schema(),
     )
     async def create_audit_report_tool(
-        request: CreateAuditReportRequest, ctx: Context
+        ctx: Context,
+        section: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=120,
+                description="Markdown H2 section heading (e.g. 'Overview', 'Table schema', 'Findings', 'Limitations').",
+            ),
+        ],
+        content: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Markdown body content for this section (evidence should cite `path:line`).",
+            ),
+        ],
+        title: Annotated[
+            str | None,
+            Field(
+                max_length=200,
+                description="Top-level `# <Title>` heading used when creating the report on the first call.",
+            ),
+        ] = None,
+        filename: Annotated[
+            str | None,
+            Field(
+                max_length=120,
+                description="Optional `.md` filename inside the allowed output directory (used only on the first call).",
+            ),
+        ] = None,
+        is_final: Annotated[
+            bool,
+            Field(description="Set to True only on the last call once all report sections are complete."),
+        ] = False,
     ) -> dict:
         """Create or append a redacted Markdown section to the active audit report."""
+        request = CreateAuditReportRequest(
+            section=section,
+            content=content,
+            title=title,
+            filename=filename,
+            is_final=is_final,
+        )
         res = await asyncio.to_thread(writer.write_section, request=request)
         await ctx.info(
             f"Saved report section '{res.section_saved}' to {res.metadata.file_path} "

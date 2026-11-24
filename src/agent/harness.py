@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from agent.prompts import build_system_prompt, main_goal_prompt
 from clients.openai_client import client as default_client
 from core.settings import settings
+from guardrails.ignored_path import list_unignored_stdlib
 from guardrails.redact import redact_text
 from guardrails.track_turns import TurnTracker
 from guardrails.turn_counter import turn_counter
@@ -201,21 +202,93 @@ def format_assistant_message(msg: ChatCompletionMessage) -> ChatCompletionAssist
     }
 
 
+_INVALID_JSON_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+_FLAT_SCHEMA_TOOLS = {
+    "list_folder_content",
+    "read_file_slice",
+    "search_symbol",
+    "create_audit_report",
+}
+
+
+def _safe_json_loads(raw: str) -> Any:
+    """Parse JSON, repairing stray regex backslash escapes (e.g. `\\(`, `\\s`) if needed."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        repaired = _INVALID_JSON_ESCAPE.sub(r"\\\\", raw)
+        return json.loads(repaired)
+
+
+def _normalize_tool_args(tool_name: str, parsed_args: dict[str, Any]) -> dict[str, Any]:
+    """Repair common LLM tool-argument quirks: nested/stringified `request`, regex escapes, or `line_end <= 0`."""
+    if tool_name not in _FLAT_SCHEMA_TOOLS:
+        return parsed_args
+
+    normalized: dict[str, Any] = dict(parsed_args)
+    if "request" in normalized:
+        req: Any = normalized["request"]
+        for _ in range(2):
+            if isinstance(req, str):
+                try:
+                    req = _safe_json_loads(req)
+                except json.JSONDecodeError:
+                    break
+        if isinstance(req, dict):
+            normalized = dict(req)
+
+    if tool_name == "read_file_slice":
+        line_end = normalized.get("line_end")
+        if isinstance(line_end, int) and not isinstance(line_end, bool) and line_end <= 0:
+            normalized["line_end"] = None
+
+    return normalized
+
+
+def _find_matching_stem_files(
+    requested_path: str,
+    preflight_files: list[str],
+    repo_path: Path | None,
+    preflight_has_more: bool,
+) -> list[str]:
+    """Return all existing unignored repo-relative files sharing the requested filename stem (excluding extension)."""
+    target_stem = Path(requested_path.strip()).stem.lower()
+    if not target_stem:
+        return []
+
+    if preflight_has_more and repo_path is not None:
+        resolved_root = repo_path.resolve()
+        candidate_files = sorted(
+            p.relative_to(resolved_root).as_posix()
+            for p in list_unignored_stdlib(resolved_root, root_dir=resolved_root)
+        )
+    else:
+        candidate_files = preflight_files
+
+    return [rel for rel in candidate_files if Path(rel).stem.lower() == target_stem]
+
+
 async def _execute_tool_call(
     mcp_client: Client,
     tool_call: Any,
-) -> tuple[dict[str, Any], ToolCallRecord, str | None, bool]:
+    *,
+    repo_path: Path | None = None,
+    preflight_files: list[str] | None = None,
+    preflight_has_more: bool = False,
+) -> tuple[dict[str, Any], ToolCallRecord, str | None, list[str] | None, bool]:
     """Execute one MCP tool call, redact its output, and capture a TurnTracker record."""
     tool_name = tool_call.function.name
     raw_args = tool_call.function.arguments or "{}"
     parsed_args: dict[str, Any] = {}
     report_file: str | None = None
+    sections_written: list[str] | None = None
     report_finalized = False
 
     try:
-        parsed_args = json.loads(raw_args)
+        parsed_args = _safe_json_loads(raw_args)
         if not isinstance(parsed_args, dict):
             raise ValueError("Tool arguments must decode to a JSON object")
+        parsed_args = _normalize_tool_args(tool_name, parsed_args)
 
         res = await mcp_client.call_tool(tool_name, parsed_args)
         payload = res.structured_content
@@ -223,6 +296,9 @@ async def _execute_tool_call(
 
         if tool_name == "create_audit_report" and isinstance(payload, dict):
             report_file = payload.get("file_name")
+            raw_sections = payload.get("sections_written")
+            if isinstance(raw_sections, list):
+                sections_written = [str(s) for s in raw_sections]
             report_finalized = bool(payload.get("is_final"))
 
         record = ToolCallRecord(
@@ -232,7 +308,39 @@ async def _execute_tool_call(
             is_error=False,
         )
     except Exception as exc:
-        error_payload = {"error": redact_text(str(exc))}
+        err_text = redact_text(str(exc))
+        if "path does not exist" in err_text.lower():
+            if isinstance(parsed_args, dict):
+                req_dict = parsed_args.get("request")
+                requested_path = str(
+                    req_dict.get("path", "")
+                    if isinstance(req_dict, dict)
+                    else parsed_args.get("path", "")
+                )
+            else:
+                requested_path = ""
+            matches = (
+                _find_matching_stem_files(
+                    requested_path,
+                    preflight_files or [],
+                    repo_path,
+                    preflight_has_more,
+                )
+                if requested_path
+                else []
+            )
+            if matches:
+                stem = Path(requested_path.strip()).stem
+                err_text = (
+                    f"Path does not exist: '{requested_path}'. "
+                    f"Existing files matching name '{stem}': {matches}. "
+                    "Pick the exact repo-relative path you need."
+                )
+            else:
+                err_text = (
+                    f"{err_text} Use an exact repo-relative path from the Pre-flight repository map."
+                )
+        error_payload = {"error": err_text}
         redacted_content = json.dumps(error_payload)
         logger.warning("[TOOL ERROR] %s failed: %s", tool_name, exc)
         record = ToolCallRecord(
@@ -247,7 +355,7 @@ async def _execute_tool_call(
         "tool_call_id": tool_call.id,
         "content": redacted_content,
     }
-    return tool_message, record, report_file, report_finalized
+    return tool_message, record, report_file, sections_written, report_finalized
 
 
 _SCHEMA_EXTENSIONS = {".sql", ".prisma", ".graphql", ".dbml"}
@@ -282,8 +390,24 @@ _DB_ACCESS_KEYWORDS = {
 }
 
 
+_TEST_DIR_NAMES = {"test", "tests", "__tests__", "spec", "specs"}
+
+
+def _is_test_path(path: Path) -> bool:
+    """Return True if a repo-relative path belongs to a test directory or test file."""
+    if any(part.lower() in _TEST_DIR_NAMES for part in path.parts[:-1]):
+        return True
+    stem = path.stem.lower()
+    return (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or stem.endswith(".test")
+        or stem.endswith(".spec")
+    )
+
+
 def _classify_preflight_paths(paths: list[str]) -> tuple[list[str], list[str]]:
-    """Split repo-relative paths into candidate schema/model files and DB-access files."""
+    """Split non-test repo-relative paths into candidate schema/model files and DB-access files."""
     schema_files: list[str] = []
     db_access_files: list[str] = []
 
@@ -292,6 +416,8 @@ def _classify_preflight_paths(paths: list[str]) -> tuple[list[str], list[str]]:
         if not rel:
             continue
         p = Path(rel)
+        if _is_test_path(p):
+            continue
         suffix = p.suffix.lower()
         part_tokens = [part.lower() for part in p.parts]
         stem_tokens = re.split(r"[^a-z0-9]+", p.stem.lower())
@@ -305,18 +431,16 @@ def _classify_preflight_paths(paths: list[str]) -> tuple[list[str], list[str]]:
     return schema_files, db_access_files
 
 
-async def _build_preflight_context(mcp_client: Client) -> str:
-    """Deterministically list root files and highlight candidate schema/DB files before Turn 1."""
+async def _build_preflight_context(mcp_client: Client) -> tuple[str, list[str], bool]:
+    """Deterministically list root files and highlight candidate non-test schema/DB files before Turn 1."""
     try:
-        res = await mcp_client.call_tool(
-            "list_folder_content", {"request": {"path": ".", "batch": 1}}
-        )
+        res = await mcp_client.call_tool("list_folder_content", {"path": ".", "batch": 1})
         payload = res.structured_content
         if not isinstance(payload, dict):
-            return ""
+            return "", [], False
     except Exception as exc:
         logger.warning("[PREFLIGHT] Skipped root listing: %s", exc)
-        return ""
+        return "", [], False
 
     raw_content = str(payload.get("content") or "")
     files = [line.strip() for line in raw_content.splitlines() if line.strip()]
@@ -343,7 +467,131 @@ async def _build_preflight_context(mcp_client: Client) -> str:
     lines.append("\nAll listed files (batch 1):")
     lines.append(raw_content if raw_content else "(empty repository)")
 
-    return redact_text("\n".join(lines))
+    return redact_text("\n".join(lines)), files, has_more
+
+
+_EXPECTED_REPORT_SECTIONS = (
+    "Overview",
+    "Table schema",
+    "ERD",
+    "Query inventory",
+    "Findings",
+    "Limitations",
+)
+_COMPACTABLE_TOOLS = {"read_file_slice", "search_symbol", "list_folder_content"}
+
+
+def _build_turn_state_header(
+    turn: int,
+    max_turns: int,
+    phase: Literal["EXPLORE", "WRITE_CHECKPOINT", "FINALIZE"],
+    report_file: str | None,
+    sections_written: list[str],
+) -> str:
+    """Build a compact 1-line live progress header injected ephemerally each turn."""
+    written_lower = {s.strip().lower() for s in sections_written}
+    remaining = [s for s in _EXPECTED_REPORT_SECTIONS if s.lower() not in written_lower]
+    written_str = ", ".join(sections_written) if sections_written else "none"
+    remaining_str = ", ".join(remaining) if remaining else "none"
+    report_str = report_file or "none"
+
+    turns_left_including_this = max_turns - turn + 1
+
+    if turn == max_turns:
+        action = (
+            "FINAL TURN! Read tools disabled. Save ALL remaining sections in this turn "
+            "(batch multiple create_audit_report calls if needed) and set is_final=true on the last call."
+        )
+    elif phase == "FINALIZE":
+        action = (
+            f"Read tools disabled ({turns_left_including_this} turn(s) left, {len(remaining)} section(s) remaining). "
+            "Batch multiple create_audit_report calls in one turn if needed, and set is_final=true on your final section."
+        )
+    elif phase == "WRITE_CHECKPOINT":
+        action = (
+            "Read tools paused this turn. Call create_audit_report to save confirmed findings "
+            "(keep is_final=false if more areas remain); read tools resume next turn."
+        )
+    else:
+        action = "Batch parallel reads/searches or save confirmed sections with create_audit_report."
+
+    return (
+        f"[STATE] Turn {turn}/{max_turns} | Phase: {phase} | Report: {report_str} | "
+        f"Written: [{written_str}] | Remaining: [{remaining_str}] | Next: {action}"
+    )
+
+
+def _with_ephemeral_state_header(
+    messages: list[ChatCompletionMessageParam],
+    state_header: str,
+) -> list[ChatCompletionMessageParam]:
+    """Attach the live state header for one LLM call without polluting persistent message history."""
+    if messages and messages[-1].get("role") == "user":
+        last_msg = dict(messages[-1])
+        last_content = str(last_msg.get("content") or "")
+        last_msg["content"] = f"{state_header}\n\n{last_content}"
+        return [*messages[:-1], last_msg]  # type: ignore[list-item]
+    return [*messages, {"role": "user", "content": state_header}]
+
+
+def _compact_prior_read_outputs(
+    messages: list[ChatCompletionMessageParam],
+    tool_call_meta: dict[str, tuple[str, dict[str, Any]]],
+    sections_written: list[str],
+    *,
+    cutoff_index: int,
+    min_chars: int = settings.LLM_COMPACT_MIN_CHARS,
+) -> tuple[int, int]:
+    """Replace bulky prior read/search tool payloads in-place after findings are saved to Markdown."""
+    compacted_count = 0
+    chars_freed = 0
+
+    for msg in messages[:cutoff_index]:
+        if msg.get("role") != "tool":
+            continue
+        call_id = str(msg.get("tool_call_id") or "")
+        tool_name, args = tool_call_meta.get(call_id, ("", {}))
+        if tool_name not in _COMPACTABLE_TOOLS:
+            continue
+
+        raw_content = str(msg.get("content") or "")
+        if len(raw_content) <= min_chars:
+            continue
+
+        try:
+            parsed = json.loads(raw_content)
+        except json.JSONDecodeError:
+            parsed = None
+
+        if isinstance(parsed, dict) and parsed.get("compacted"):
+            continue
+
+        req_args = args.get("request") if isinstance(args.get("request"), dict) else args
+        summary: dict[str, Any] = {
+            "compacted": True,
+            "tool": tool_name,
+        }
+        if isinstance(req_args, dict):
+            if "path" in req_args:
+                summary["path"] = req_args["path"]
+            if "symbol" in req_args:
+                summary["symbol"] = req_args["symbol"]
+
+        if isinstance(parsed, dict):
+            for key in ("line_read", "total_lines", "total_matches", "has_more", "next_line"):
+                if key in parsed and parsed[key] is not None:
+                    summary[key] = parsed[key]
+
+        summary["saved_sections"] = list(sections_written)
+        summary["note"] = "Raw output compacted after report write. Re-read only if needed."
+
+        new_content = json.dumps(summary)
+        if len(new_content) < len(raw_content):
+            chars_freed += len(raw_content) - len(new_content)
+            msg["content"] = new_content  # type: ignore[typeddict-item]
+            compacted_count += 1
+
+    return compacted_count, chars_freed
 
 
 async def repo_auditing(
@@ -361,12 +609,16 @@ async def repo_auditing(
     retry_max_delay: float = settings.LLM_RETRY_MAX_DELAY_SECONDS,
     temperature: float = settings.LLM_TEMPERATURE,
     parallel_tool_calls: bool = settings.LLM_PARALLEL_TOOL_CALLS,
+    write_checkpoint_turns: int = settings.LLM_WRITE_CHECKPOINT_TURNS,
+    compact_min_chars: int = settings.LLM_COMPACT_MIN_CHARS,
 ) -> AuditRunResult:
-    """Run the multi-turn async audit loop with pre-flight mapping, parallel tool execution, redaction, and TurnTracker."""
+    """Run the multi-turn async audit loop with pre-flight mapping, phase state machine, compaction, redaction, and TurnTracker."""
     if max_retries < 0:
         raise ValueError("max_retries must be >= 0")
     if turn_delay_seconds < 0 or retry_base_delay < 0 or retry_max_delay < 0:
         raise ValueError("delay settings must be >= 0")
+    if write_checkpoint_turns < 0:
+        raise ValueError("write_checkpoint_turns must be >= 0")
 
     effective_max_turns = max_turns if max_turns is not None else turn_counter(repo_path)
     tracker = TurnTracker(max_turns=effective_max_turns, max_repeats=3)
@@ -375,8 +627,11 @@ async def repo_auditing(
         tool for tool in tools if tool["function"]["name"] == "create_audit_report"
     ]
 
-    preflight_context = await _build_preflight_context(mcp_client)
+    preflight_context, preflight_files, preflight_has_more = await _build_preflight_context(
+        mcp_client
+    )
     preflight_block = f"\n\n{preflight_context}" if preflight_context else ""
+    resolved_repo_path = Path(repo_path).resolve()
 
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
@@ -394,6 +649,9 @@ async def repo_auditing(
     ]
 
     active_report_file: str | None = None
+    sections_written: list[str] = []
+    turns_since_last_write = 0
+    tool_call_meta: dict[str, tuple[str, dict[str, Any]]] = {}
 
     for turn in range(1, effective_max_turns + 1):
         if turn > 1 and turn_delay_seconds > 0:
@@ -404,20 +662,45 @@ async def repo_auditing(
             )
             await asyncio.sleep(turn_delay_seconds)
 
-        write_only_mode = effective_max_turns >= 4 and turn > budget_turn
-        active_tools = write_only_tools if (write_only_mode and write_only_tools) else tools
-        if write_only_mode and write_only_tools:
+        if effective_max_turns >= 4 and turn > budget_turn:
+            phase: Literal["EXPLORE", "WRITE_CHECKPOINT", "FINALIZE"] = "FINALIZE"
+        elif (
+            write_checkpoint_turns > 0
+            and turns_since_last_write >= write_checkpoint_turns
+            and bool(write_only_tools)
+        ):
+            phase = "WRITE_CHECKPOINT"
+        else:
+            phase = "EXPLORE"
+
+        if phase in {"FINALIZE", "WRITE_CHECKPOINT"} and write_only_tools:
+            active_tools = write_only_tools
             logger.info(
-                "[WRITE-ONLY MODE] Turn %d/%d: restricting tools to create_audit_report only.",
+                "[PHASE %s] Turn %d/%d: restricting tools to create_audit_report only.",
+                phase,
                 turn,
                 effective_max_turns,
             )
+        else:
+            active_tools = tools
+
+        if turn > 1:
+            state_header = _build_turn_state_header(
+                turn=turn,
+                max_turns=effective_max_turns,
+                phase=phase,
+                report_file=active_report_file,
+                sections_written=sections_written,
+            )
+            request_messages = _with_ephemeral_state_header(messages, state_header)
+        else:
+            request_messages = messages
 
         logger.info("[TURN %d/%d] Requesting model action.", turn, effective_max_turns)
         response = await _call_llm_with_retry(
             client=client,
             model_name=model_name,
-            messages=messages,
+            messages=request_messages,
             tools=active_tools,
             max_retries=max_retries,
             retry_base_delay=retry_base_delay,
@@ -437,23 +720,42 @@ async def repo_auditing(
                 final_message=redact_text(assistant_msg.content or ""),
             )
 
+        pre_turn_msg_count = len(messages)
         messages.append(format_assistant_message(assistant_msg))
 
         # Execute 1 or N tool calls concurrently via asyncio.gather
         executions = await asyncio.gather(
-            *(_execute_tool_call(mcp_client, tc) for tc in assistant_msg.tool_calls)
+            *(
+                _execute_tool_call(
+                    mcp_client,
+                    tc,
+                    repo_path=resolved_repo_path,
+                    preflight_files=preflight_files,
+                    preflight_has_more=preflight_has_more,
+                )
+                for tc in assistant_msg.tool_calls
+            )
         )
 
         turn_records: list[ToolCallRecord] = []
         report_finalized = False
+        wrote_report_this_turn = False
+        gathered_info_this_turn = False
 
-        for tool_msg, record, report_file, is_final in executions:
+        for tool_msg, record, report_file, updated_sections, is_final in executions:
             messages.append(tool_msg)  # type: ignore[arg-type]
             turn_records.append(record)
+            tool_call_meta[str(tool_msg["tool_call_id"])] = (record.tool_name, record.arguments)
+
             if report_file:
                 active_report_file = report_file
+            if updated_sections is not None:
+                sections_written = updated_sections
+                wrote_report_this_turn = True
             if is_final:
                 report_finalized = True
+            if not record.is_error and record.tool_name != "create_audit_report":
+                gathered_info_this_turn = True
 
         # Stop condition 2: agent explicitly finalized the Markdown audit report
         if report_finalized:
@@ -464,6 +766,25 @@ async def repo_auditing(
                 report_file=active_report_file,
                 final_message=f"Audit report finalized: {active_report_file}",
             )
+
+        # Update phase checkpoint counter & compact older raw reads once findings are persisted
+        if wrote_report_this_turn:
+            turns_since_last_write = 0
+            compacted, freed = _compact_prior_read_outputs(
+                messages=messages,
+                tool_call_meta=tool_call_meta,
+                sections_written=sections_written,
+                cutoff_index=pre_turn_msg_count,
+                min_chars=compact_min_chars,
+            )
+            if compacted > 0:
+                logger.info(
+                    "[COMPACT] Compacted %d prior read/search output(s), freed %d chars.",
+                    compacted,
+                    freed,
+                )
+        elif gathered_info_this_turn:
+            turns_since_last_write += 1
 
         # Evaluate TurnTracker guardrails (repetition, consecutive errors, 85% soft cap, hard cap)
         decision = tracker.record_turn(turn_records)
@@ -498,6 +819,8 @@ async def run_pipeline(
     retry_max_delay: float = settings.LLM_RETRY_MAX_DELAY_SECONDS,
     temperature: float = settings.LLM_TEMPERATURE,
     parallel_tool_calls: bool = settings.LLM_PARALLEL_TOOL_CALLS,
+    write_checkpoint_turns: int = settings.LLM_WRITE_CHECKPOINT_TURNS,
+    compact_min_chars: int = settings.LLM_COMPACT_MIN_CHARS,
 ) -> AuditRunResult:
     """Bind deterministic repo & report sandboxes, open the MCP session, and run the audit."""
     logger.info("[PIPELINE] Starting audit pipeline.")
@@ -534,4 +857,6 @@ async def run_pipeline(
             retry_max_delay=retry_max_delay,
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
+            write_checkpoint_turns=write_checkpoint_turns,
+            compact_min_chars=compact_min_chars,
         )

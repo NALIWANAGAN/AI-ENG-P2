@@ -110,7 +110,13 @@ class TurnTracker:
         budget_turn = int(0.85 * self._max_turns)
         if self._max_turns >= 4 and turn_num >= budget_turn:
             turns_left = self._max_turns - turn_num
-            logger.warning("[SOFT MAX TURN] REACHED 85%% of MAX TURNS: %d", budget_turn)
+            logger.warning(
+                "[SOFT MAX TURN] Turn %d/%d (%d left, 85%% threshold=%d)",
+                turn_num,
+                self._max_turns,
+                turns_left,
+                budget_turn,
+            )
             msg = (
                 f"Budget almost exhausted ({turns_left} turns left). Stop opening new files, "
                 "write your remaining findings with create_audit_report, and list unchecked areas under Limitations."

@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -45,10 +46,12 @@ class TestAuditReportMCPIntegration:
         )
 
         report_tool = tool_map["create_audit_report"]
-        assert "ctx" not in report_tool.input_schema.get("properties", {})
-        req_props = report_tool.input_schema["properties"]["request"].get("properties", {})
-        assert "max_report_bytes" not in req_props
-        assert "output_dir" not in req_props
+        props = report_tool.input_schema.get("properties", {})
+        assert "ctx" not in props
+        assert "request" not in props
+        assert {"section", "content", "title", "filename", "is_final"}.issubset(props.keys())
+        assert "max_report_bytes" not in props
+        assert "output_dir" not in props
 
         assert report_tool.output_schema is not None
         assert "metadata" not in report_tool.output_schema.get("properties", {})
@@ -71,12 +74,10 @@ class TestAuditReportMCPIntegration:
                 await client.call_tool(
                     "create_audit_report",
                     {
-                        "request": {
-                            "title": "Schema Audit",
-                            "filename": "schema_audit.md",
-                            "section": "Overview",
-                            "content": "Connected via postgres://root:topsecret@10.0.0.1:5432/shop.",
-                        }
+                        "title": "Schema Audit",
+                        "filename": "schema_audit.md",
+                        "section": "Overview",
+                        "content": "Connected via postgres://root:topsecret@10.0.0.1:5432/shop.",
                     },
                 )
             )
@@ -84,10 +85,8 @@ class TestAuditReportMCPIntegration:
                 await client.call_tool(
                     "create_audit_report",
                     {
-                        "request": {
-                            "section": "Findings",
-                            "content": "- Found bug in `src/repo.py:12` (contact: dev@example.com).",
-                        }
+                        "section": "Findings",
+                        "content": "- Found bug in `src/repo.py:12` (contact: dev@example.com).",
                     },
                 )
             )
@@ -95,23 +94,21 @@ class TestAuditReportMCPIntegration:
                 await client.call_tool(
                     "create_audit_report",
                     {
-                        "request": {
-                            "section": "Findings",
-                            "content": "- Second bug in `src/repo.py:40`.",
-                            "is_final": True,
-                        }
+                        "section": "Findings",
+                        "content": "- Second bug in `src/repo.py:40`.",
+                        "is_final": True,
                     },
                 )
             )
 
-        assert p1["file_name"] == "schema_audit.md"
+        assert re.fullmatch(r"schema_audit-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.md", p1["file_name"])
         assert "metadata" not in p1
-        assert p2["file_name"] == "schema_audit.md"
+        assert p2["file_name"] == p1["file_name"]
         assert p3["sections_written"] == ["Overview", "Findings"]
         assert p3["is_final"] is True
         assert any("Saved report section 'Overview'" in str(entry.data) for entry in logs)
 
-        on_disk = (report_dirs["output_dir"] / "schema_audit.md").read_text(encoding="utf-8")
+        on_disk = (report_dirs["output_dir"] / p1["file_name"]).read_text(encoding="utf-8")
         assert on_disk.count("## Findings") == 1
         assert "topsecret" not in on_disk
         assert "dev@example.com" not in on_disk
@@ -124,24 +121,27 @@ class TestAuditReportMCPIntegration:
     ) -> None:
         audit_mcp = create_audit_report_mcp(output_dir=report_dirs["output_dir"])
         async with Client(audit_mcp) as client:
-            await client.call_tool(
-                "create_audit_report",
-                {"request": {"filename": "concurrent.md", "section": "Overview", "content": "Init"}},
+            p0 = _extract_payload(
+                await client.call_tool(
+                    "create_audit_report",
+                    {"filename": "concurrent.md", "section": "Overview", "content": "Init"},
+                )
             )
             r1, r2 = await asyncio.gather(
                 client.call_tool(
                     "create_audit_report",
-                    {"request": {"section": "Table schema", "content": "- `orders` (`schema.sql:1`)"}},
+                    {"section": "Table schema", "content": "- `orders` (`schema.sql:1`)"},
                 ),
                 client.call_tool(
                     "create_audit_report",
-                    {"request": {"section": "Query inventory", "content": "- `SELECT *` (`repo.py:3`)"}},
+                    {"section": "Query inventory", "content": "- `SELECT *` (`repo.py:3`)"},
                 ),
             )
 
-        assert _extract_payload(r1)["file_name"] == "concurrent.md"
-        assert _extract_payload(r2)["file_name"] == "concurrent.md"
-        text = (report_dirs["output_dir"] / "concurrent.md").read_text(encoding="utf-8")
+        assert re.fullmatch(r"concurrent-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.md", p0["file_name"])
+        assert _extract_payload(r1)["file_name"] == p0["file_name"]
+        assert _extract_payload(r2)["file_name"] == p0["file_name"]
+        text = (report_dirs["output_dir"] / p0["file_name"]).read_text(encoding="utf-8")
         assert "## Table schema" in text
         assert "## Query inventory" in text
 
@@ -150,7 +150,6 @@ class TestAuditReportMCPIntegration:
         [
             {"filename": "../escape.md", "section": "Overview", "content": "x"},
             {"filename": "evil.py", "section": "Overview", "content": "x"},
-            {"filename": "README.md", "section": "Overview", "content": "x"},
             {"section": "   ", "content": "x"},
             {"section": "Overview", "content": "   "},
         ],
@@ -161,7 +160,7 @@ class TestAuditReportMCPIntegration:
         audit_mcp = create_audit_report_mcp(output_dir=report_dirs["output_dir"])
         async with Client(audit_mcp) as client:
             with pytest.raises(ToolError):
-                await client.call_tool("create_audit_report", {"request": request_payload})
+                await client.call_tool("create_audit_report", request_payload)
 
     async def test_sad_writing_after_is_final_raises_tool_error(
         self, report_dirs: dict[str, Path]
@@ -170,10 +169,10 @@ class TestAuditReportMCPIntegration:
         async with Client(audit_mcp) as client:
             await client.call_tool(
                 "create_audit_report",
-                {"request": {"section": "Limitations", "content": "All done.", "is_final": True}},
+                {"section": "Limitations", "content": "All done.", "is_final": True},
             )
             with pytest.raises(ToolError, match="already been finalized"):
                 await client.call_tool(
                     "create_audit_report",
-                    {"request": {"section": "Extra", "content": "Should fail"}},
+                    {"section": "Extra", "content": "Should fail"},
                 )

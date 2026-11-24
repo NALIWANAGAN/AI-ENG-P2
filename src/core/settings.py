@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # LLM Rate-Limit, Decoding & Retry Policy (RPM / TPM pacing)
     LLM_TEMPERATURE: float = 0.0
     LLM_PARALLEL_TOOL_CALLS: bool = True
+    LLM_WRITE_CHECKPOINT_TURNS: int = 3
+    LLM_COMPACT_MIN_CHARS: int = 300
     LLM_MAX_RETRIES: int = 5
     LLM_TURN_DELAY_SECONDS: float = 4.0
     LLM_RETRY_BASE_DELAY_SECONDS: float = 10.0

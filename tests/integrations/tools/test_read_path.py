@@ -146,12 +146,13 @@ class TestMCPToolDiscovery:
         }
         for name, tool in tool_map.items():
             # FastMCP injects Context internally; it must never appear in the LLM input schema
-            assert "ctx" not in tool.input_schema.get("properties", {}), name
-            assert "request" in tool.input_schema.get("properties", {}), name
+            props = tool.input_schema.get("properties", {})
+            assert "ctx" not in props, name
+            assert "request" not in props, name
+            assert "path" in props, name
 
             # Server-side guardrails must never be exposed for the LLM to override
-            req_props = tool.input_schema["properties"]["request"].get("properties", {})
-            assert hidden_guardrails.isdisjoint(req_props.keys()), (name, req_props.keys())
+            assert hidden_guardrails.isdisjoint(props.keys()), (name, props.keys())
 
             # Output schema must never advertise internal audit `metadata`
             assert tool.output_schema is not None, name
@@ -175,7 +176,7 @@ class TestListFolderContentMCPIntegration:
             logs.append(message)
 
         async with Client(read_path_mcp, log_handler=log_handler) as client:
-            result = await client.call_tool("list_folder_content", {"request": {"path": "."}})
+            result = await client.call_tool("list_folder_content", {"path": "."})
 
         payload = _extract_payload(result)
         assert payload["read_type"] == "directory_read"
@@ -209,10 +210,10 @@ class TestListFolderContentMCPIntegration:
         paged_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], items_per_batch=3)
         async with Client(paged_mcp) as client:
             p1 = _extract_payload(
-                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 1}})
+                await client.call_tool("list_folder_content", {"path": ".", "batch": 1})
             )
             p2 = _extract_payload(
-                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 2}})
+                await client.call_tool("list_folder_content", {"path": ".", "batch": 2})
             )
 
         assert p1["line_read"] == "l1-3"
@@ -226,16 +227,16 @@ class TestListFolderContentMCPIntegration:
     ) -> None:
         async with Client(read_path_mcp) as client:
             empty = _extract_payload(
-                await client.call_tool("list_folder_content", {"request": {"path": "empty_dir"}})
+                await client.call_tool("list_folder_content", {"path": "empty_dir"})
             )
             oob = _extract_payload(
-                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 99}})
+                await client.call_tool("list_folder_content", {"path": ".", "batch": 99})
             )
 
         capped_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], max_tokens=10)
         async with Client(capped_mcp) as client:
             capped = _extract_payload(
-                await client.call_tool("list_folder_content", {"request": {"path": ".", "batch": 1}})
+                await client.call_tool("list_folder_content", {"path": ".", "batch": 1})
             )
 
         assert empty["content"] == ""
@@ -265,7 +266,7 @@ class TestListFolderContentMCPIntegration:
     ) -> None:
         async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
-                await client.call_tool("list_folder_content", {"request": request_payload})
+                await client.call_tool("list_folder_content", request_payload)
 
 
 # =======================================================
@@ -287,13 +288,13 @@ class TestReadFileSliceMCPIntegration:
             s1 = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
-                    {"request": {"path": "long_file.txt", "line_start": 10, "line_end": 15}},
+                    {"path": "long_file.txt", "line_start": 10, "line_end": 15},
                 )
             )
             s2 = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
-                    {"request": {"path": "long_file.txt", "line_start": s1["next_line"], "line_end": 20}},
+                    {"path": "long_file.txt", "line_start": s1["next_line"], "line_end": 20},
                 )
             )
 
@@ -313,16 +314,16 @@ class TestReadFileSliceMCPIntegration:
     ) -> None:
         async with Client(read_path_mcp) as client:
             empty = _extract_payload(
-                await client.call_tool("read_file_slice", {"request": {"path": "empty.txt"}})
+                await client.call_tool("read_file_slice", {"path": "empty.txt"})
             )
             beyond_eof = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
-                    {"request": {"path": "long_file.txt", "line_start": 100, "line_end": 120}},
+                    {"path": "long_file.txt", "line_start": 100, "line_end": 120},
                 )
             )
             bad_utf8 = _extract_payload(
-                await client.call_tool("read_file_slice", {"request": {"path": "bad_utf8.txt"}})
+                await client.call_tool("read_file_slice", {"path": "bad_utf8.txt"})
             )
 
         capped_mcp = create_read_path_mcp(root_dir=sample_mcp_repo["project"], max_tokens=40)
@@ -330,11 +331,11 @@ class TestReadFileSliceMCPIntegration:
             capped = _extract_payload(
                 await client.call_tool(
                     "read_file_slice",
-                    {"request": {"path": "long_file.txt", "line_start": 1, "line_end": 50}},
+                    {"path": "long_file.txt", "line_start": 1, "line_end": 50},
                 )
             )
             minified = _extract_payload(
-                await client.call_tool("read_file_slice", {"request": {"path": "minified.js"}})
+                await client.call_tool("read_file_slice", {"path": "minified.js"})
             )
 
         assert empty["content"] == "" and empty["total_line_count"] == 0 and empty["line_read"] is None
@@ -360,7 +361,7 @@ class TestReadFileSliceMCPIntegration:
     ) -> None:
         async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
-                await client.call_tool("read_file_slice", {"request": request_payload})
+                await client.call_tool("read_file_slice", request_payload)
 
     async def test_sad_absolute_outside_path_blocked(
         self, read_path_mcp: FastMCP, sample_mcp_repo: dict[str, Path]
@@ -368,7 +369,7 @@ class TestReadFileSliceMCPIntegration:
         outside_file = str(sample_mcp_repo["sibling_secret"] / "outside.txt")
         async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
-                await client.call_tool("read_file_slice", {"request": {"path": outside_file}})
+                await client.call_tool("read_file_slice", {"path": outside_file})
 
 
 # =======================================================
@@ -390,19 +391,19 @@ class TestSearchSymbolMCPIntegration:
             all_res = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": ".", "symbol": "total_cents", "mode": "all"}},
+                    {"path": ".", "symbol": "total_cents", "mode": "all"},
                 )
             )
             def_res = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": "src", "symbol": "total_cents", "mode": "definitions"}},
+                    {"path": "src", "symbol": "total_cents", "mode": "definitions"},
                 )
             )
             sql_only = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": ".", "symbol": "total_cents", "file_extensions": ["sql"]}},
+                    {"path": ".", "symbol": "total_cents", "file_extensions": ["sql"]},
                 )
             )
 
@@ -435,19 +436,19 @@ class TestSearchSymbolMCPIntegration:
             p1 = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": "noisy.py", "symbol": "total_cents", "batch": 1}},
+                    {"path": "noisy.py", "symbol": "total_cents", "batch": 1},
                 )
             )
             p3 = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": "noisy.py", "symbol": "total_cents", "batch": 3}},
+                    {"path": "noisy.py", "symbol": "total_cents", "batch": 3},
                 )
             )
             no_hits = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": ".", "symbol": "nonexistent_xyz_symbol"}},
+                    {"path": ".", "symbol": "nonexistent_xyz_symbol"},
                 )
             )
 
@@ -456,7 +457,7 @@ class TestSearchSymbolMCPIntegration:
             tok_capped = _extract_payload(
                 await client.call_tool(
                     "search_symbol",
-                    {"request": {"path": ".", "symbol": "total_cents"}},
+                    {"path": ".", "symbol": "total_cents"},
                 )
             )
 
@@ -484,7 +485,7 @@ class TestSearchSymbolMCPIntegration:
     ) -> None:
         async with Client(read_path_mcp) as client:
             with pytest.raises(ToolError):
-                await client.call_tool("search_symbol", {"request": request_payload})
+                await client.call_tool("search_symbol", request_payload)
 
 
 # =======================================================
@@ -500,13 +501,13 @@ class TestEndToEndAuditorWorkflow:
         """Simulate an autonomous auditor: list -> read schema -> search symbol -> read code slice."""
         async with Client(read_path_mcp) as client:
             tree = _extract_payload(
-                await client.call_tool("list_folder_content", {"request": {"path": "src"}})
+                await client.call_tool("list_folder_content", {"path": "src"})
             )
             files = tree["content"].splitlines()
             assert "src/schema.sql" in files
 
             schema = _extract_payload(
-                await client.call_tool("read_file_slice", {"request": {"path": "src/schema.sql"}})
+                await client.call_tool("read_file_slice", {"path": "src/schema.sql"})
             )
             assert "total_cents INTEGER NOT NULL" in schema["content"]
 
@@ -514,11 +515,9 @@ class TestEndToEndAuditorWorkflow:
                 await client.call_tool(
                     "search_symbol",
                     {
-                        "request": {
-                            "path": "src",
-                            "symbol": "total_cents",
-                            "file_extensions": [".py"],
-                        }
+                        "path": "src",
+                        "symbol": "total_cents",
+                        "file_extensions": [".py"],
                     },
                 )
             )
@@ -529,11 +528,9 @@ class TestEndToEndAuditorWorkflow:
                 await client.call_tool(
                     "read_file_slice",
                     {
-                        "request": {
-                            "path": hits["results"][0]["path"],
-                            "line_start": max(1, hit_line - 2),
-                            "line_end": hit_line + 2,
-                        }
+                        "path": hits["results"][0]["path"],
+                        "line_start": max(1, hit_line - 2),
+                        "line_end": hit_line + 2,
                     },
                 )
             )
@@ -545,14 +542,14 @@ class TestEndToEndAuditorWorkflow:
         """Verify all 3 async tools can be invoked concurrently via asyncio.gather."""
         async with Client(read_path_mcp) as client:
             res_list, res_slice, res_search = await asyncio.gather(
-                client.call_tool("list_folder_content", {"request": {"path": "src"}}),
+                client.call_tool("list_folder_content", {"path": "src"}),
                 client.call_tool(
                     "read_file_slice",
-                    {"request": {"path": "src/schema.sql", "line_start": 1, "line_end": 5}},
+                    {"path": "src/schema.sql", "line_start": 1, "line_end": 5},
                 ),
                 client.call_tool(
                     "search_symbol",
-                    {"request": {"path": "src", "symbol": "orders", "mode": "definitions"}},
+                    {"path": "src", "symbol": "orders", "mode": "definitions"},
                 ),
             )
 

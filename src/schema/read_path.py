@@ -38,7 +38,10 @@ class ReadFileSliceRequest(BaseModel):
     line_end: int | None = Field(
         default=None,
         ge=1,
-        description=f"1-indexed ending line number (inclusive). Defaults to line_start + {settings.DEFAULT_LINES_PER_BATCH} - 1.",
+        description=(
+            f"Optional 1-indexed ending line number (inclusive). "
+            f"Omit (null) to read the default {settings.DEFAULT_LINES_PER_BATCH}-line batch — do NOT pass -1."
+        ),
     )
 
     @model_validator(mode="after")

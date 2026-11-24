@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -49,7 +50,7 @@ class TestMarkdownAuditReportWriteSection:
             )
         )
         assert isinstance(r1, AuditReportResult)
-        assert r1.file_name == "orders_audit.md"
+        assert re.fullmatch(r"orders_audit-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.md", r1.file_name)
         assert r1.section_saved == "Overview"
         assert r1.sections_written == ["Overview"]
         assert r1.is_final is False
@@ -62,7 +63,7 @@ class TestMarkdownAuditReportWriteSection:
                 content="- Missing `deleted_at IS NULL` (`src/repo.py:12`).",
             )
         )
-        assert r2.file_name == "orders_audit.md"
+        assert r2.file_name == r1.file_name
         assert r2.sections_written == ["Overview", "Findings"]
 
         # Turn 3 (Option A): repeating 'findings' (different casing) appends under existing `## Findings`
@@ -73,20 +74,20 @@ class TestMarkdownAuditReportWriteSection:
                 is_final=True,
             )
         )
-        assert r3.file_name == "orders_audit.md"
+        assert r3.file_name == r1.file_name
         assert r3.section_saved == "Findings"
         assert r3.sections_written == ["Overview", "Findings"]
         assert r3.is_final is True
         assert writer.is_finalized is True
 
         # Verify clean single-heading Markdown output on disk
-        written = (report_dirs["output_dir"] / "orders_audit.md").read_text(encoding="utf-8")
+        written = (report_dirs["output_dir"] / r1.file_name).read_text(encoding="utf-8")
         assert written.startswith("# Orders DB Audit\n\nDate: ")
         assert written.count("## Findings") == 1
         assert "Missing `deleted_at IS NULL`" in written
         assert "Unindexed join column `user_id`" in written
 
-    def test_happy_auto_generates_unique_md_filename_when_omitted(
+    def test_happy_auto_generates_unique_md_filename_when_omitted_or_colliding(
         self, report_dirs: dict[str, Path]
     ) -> None:
         w1 = MarkdownAuditReport(output_dir=report_dirs["output_dir"])
@@ -95,9 +96,20 @@ class TestMarkdownAuditReportWriteSection:
         r1 = w1.write_section(CreateAuditReportRequest(section="Overview", content="Run 1"))
         r2 = w2.write_section(CreateAuditReportRequest(section="Overview", content="Run 2"))
 
-        assert r1.file_name.startswith("audit_report_") and r1.file_name.endswith(".md")
-        assert r2.file_name.startswith("audit_report_") and r2.file_name.endswith(".md")
+        assert re.fullmatch(r"audit_report-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.md", r1.file_name)
+        assert re.fullmatch(r"audit_report-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}(-\d+)?\.md", r2.file_name)
         assert r1.file_name != r2.file_name
+
+        # Same agent-chosen filename across two separate runs never collides or overwrites existing files
+        w3 = MarkdownAuditReport(output_dir=report_dirs["output_dir"])
+        w4 = MarkdownAuditReport(output_dir=report_dirs["output_dir"])
+        r3 = w3.write_section(CreateAuditReportRequest(filename="README.md", section="Overview", content="Run 3"))
+        r4 = w4.write_section(CreateAuditReportRequest(filename="README.md", section="Overview", content="Run 4"))
+
+        assert re.fullmatch(r"README-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.md", r3.file_name)
+        assert re.fullmatch(r"README-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}(-\d+)?\.md", r4.file_name)
+        assert r3.file_name != r4.file_name
+        assert (report_dirs["output_dir"] / "README.md").read_text(encoding="utf-8") == "# Existing README\n"
 
     def test_happy_redacts_secrets_and_pii_before_writing_to_disk(
         self, report_dirs: dict[str, Path]
@@ -127,7 +139,7 @@ class TestMarkdownAuditReportWriteSection:
 
     def test_edge_concurrent_writes_stay_thread_safe(self, report_dirs: dict[str, Path]) -> None:
         writer = MarkdownAuditReport(output_dir=report_dirs["output_dir"])
-        writer.write_section(
+        r0 = writer.write_section(
             CreateAuditReportRequest(filename="parallel.md", section="Overview", content="Start")
         )
 
@@ -139,7 +151,7 @@ class TestMarkdownAuditReportWriteSection:
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(_append, range(1, 9)))
 
-        text = (report_dirs["output_dir"] / "parallel.md").read_text(encoding="utf-8")
+        text = (report_dirs["output_dir"] / r0.file_name).read_text(encoding="utf-8")
         for idx in range(1, 9):
             assert f"- Finding #{idx}" in text
 
@@ -180,7 +192,7 @@ class TestMarkdownAuditReportWriteSection:
                 CreateAuditReportRequest(filename=outside_md, section="Overview", content="x")
             )
 
-    def test_sad_non_markdown_extension_null_bytes_and_existing_file_rejected(
+    def test_sad_non_markdown_extension_and_null_bytes_rejected(
         self, report_dirs: dict[str, Path]
     ) -> None:
         writer = MarkdownAuditReport(output_dir=report_dirs["output_dir"])
@@ -192,10 +204,6 @@ class TestMarkdownAuditReportWriteSection:
         with pytest.raises(ValueError, match="null bytes"):
             writer.write_section(
                 CreateAuditReportRequest(filename="report\x00.md", section="Overview", content="x")
-            )
-        with pytest.raises(FileExistsError, match="Refusing to overwrite"):
-            writer.write_section(
-                CreateAuditReportRequest(filename="README.md", section="Overview", content="x")
             )
 
     def test_sad_max_report_bytes_exceeded_raises_value_error_without_corrupting_file(

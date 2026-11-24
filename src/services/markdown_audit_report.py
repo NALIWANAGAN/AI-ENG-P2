@@ -124,7 +124,9 @@ class MarkdownAuditReport:
             )
 
     def _resolve_new_report_path(self, filename: str | None) -> Path:
-        """Resolve a new `.md` path strictly inside `self._output_dir`, never overwriting existing files."""
+        """Resolve a unique timestamped `.md` path (`<name>-mm-dd-yyyy-HH-MM.md`) strictly inside `self._output_dir`."""
+        stamp = datetime.now().strftime("%m-%d-%Y-%H-%M")
+
         if filename is not None:
             if "\x00" in filename:
                 raise ValueError("Filename must not contain null bytes")
@@ -143,19 +145,24 @@ class MarkdownAuditReport:
                 )
             if resolved.suffix.lower() != ".md":
                 raise ValueError("Audit report filename must end with '.md'")
-            if resolved.exists():
-                raise FileExistsError(
-                    f"Refusing to overwrite existing file: '{resolved.relative_to(self._output_dir).as_posix()}'"
-                )
-            return resolved
 
-        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        candidate = (self._output_dir / f"audit_report_{stamp}.md").resolve()
+            parent = resolved.parent
+            stem = resolved.stem
+        else:
+            parent = self._output_dir
+            stem = "audit_report"
+
+        final_path = (parent / f"{stem}-{stamp}.md").resolve()
         counter = 1
-        while candidate.exists():
-            candidate = (self._output_dir / f"audit_report_{stamp}_{counter}.md").resolve()
+        while final_path.exists():
+            final_path = (parent / f"{stem}-{stamp}-{counter}.md").resolve()
             counter += 1
-        return candidate
+
+        if not final_path.is_relative_to(self._output_dir):
+            raise PermissionError(
+                f"Access denied: report path '{filename}' resolves outside the allowed output directory."
+            )
+        return final_path
 
     @staticmethod
     def _render_markdown(

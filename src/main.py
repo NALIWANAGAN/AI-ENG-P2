@@ -28,8 +28,8 @@ mcp = create_mcp_server()
 if __name__ == "__main__":
     result = asyncio.run(
         run_pipeline(
-            repo_path="C:/Users/imper/Documents/AI-ENG/P1",
-            audit_path="C:/Users/imper/Documents/AI-ENG/nested",
+            repo_path="C:/.../path",
+            audit_path="C:/.../path",
             client=openai_client,
             model_name=settings.OLLAMA_MODEL_NAME,
             max_turns=None,

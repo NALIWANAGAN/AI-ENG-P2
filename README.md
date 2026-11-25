@@ -27,48 +27,7 @@ At the center of the experiment is the agent harness in [`src/agent/harness.py`]
 
 Instead of trusting prompts alone to keep the model on track, the harness acts as an active control loop around every reasoning turn:
 
-```mermaid
-flowchart TD
-    Start["Start Audit Run\nBind repo sandbox + audit output sandbox"] --> Preflight["Deterministic Pre-Flight\nList repo files and highlight candidate\nschema & DB files (excluding unit tests)"]
-    Preflight --> Loop["Start Turn (1 .. max_turns)"]
-
-    Loop --> Pace{"turn > 1?"}
-    Pace -- "Yes" --> Delay["Proactive Turn Delay\n(Respect provider RPM/TPM)"]
-    Pace -- "No" --> PhaseGate
-    Delay --> PhaseGate
-
-    PhaseGate{"Phase State Machine"}
-    PhaseGate -- "EXPLORE" --> AllTools["All 4 tools available\n(list, search, read, write report)"]
-    PhaseGate -- "WRITE_CHECKPOINT\n(after N read turns)" --> WriteOnly1["Write-only toolset\n(Pause reads to flush findings)"]
-    PhaseGate -- "FINALIZE\n(last ~15% of budget)" --> WriteOnly2["Write-only toolset\n(Must finish remaining sections)"]
-
-    AllTools --> State["Inject Ephemeral [STATE] Header\nTurn X/Y, Phase, Written vs. Remaining sections"]
-    WriteOnly1 --> State
-    WriteOnly2 --> State
-
-    State --> LLM["LLM Reasoning Step\ntemperature=0, parallel_tool_calls=True\nExponential backoff + Retry-After on 429/5xx"]
-    LLM --> HasCalls{"Returned tool calls?"}
-
-    HasCalls -- "No (Plain Text)" --> DoneText["Exit: Completed"]
-    HasCalls -- "Yes (1..N parallel calls)" --> Norm["Normalize Arguments\nRepair regex escapes, stringified JSON, line_end=-1"]
-
-    Norm --> Parallel["Execute in Parallel via asyncio.gather()\nRedact all outputs before returning to model\nSuggest all matching stems on missing paths"]
-    Parallel --> IsFinal{"Report marked is_final=True?"}
-
-    IsFinal -- "Yes" --> DoneFinal["Exit: Completed & Report Locked"]
-    IsFinal -- "No" --> Wrote{"Saved a report section?"}
-
-    Wrote -- "Yes" --> Compact["Context Compaction\nShrink older raw read outputs in-place\nReset write-checkpoint counter"]
-    Wrote -- "No" --> Track
-    Compact --> Track
-
-    Track["TurnTracker Guardrail Evaluation"]
-    Track --> Decision{"Decision"}
-    Decision -- "stop\n(3x repeat / 3x error / max_turns)" --> DoneStop["Exit: Stopped"]
-    Decision -- "warn\n(2x repeat / 2x error / 85% budget)" --> Warn["Inject corrective feedback\ninto next turn"]
-    Decision -- "continue" --> Loop
-    Warn --> Loop
-```
+<img width="1075" height="1464" alt="Pastel Audit Pipeline Flowchart" src="https://github.com/user-attachments/assets/43efe246-b5a1-4255-b438-fbbd6c742e60" />
 
 ---
 
